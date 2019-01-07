@@ -106,6 +106,31 @@ inline std::string getNameOfCleanType(ClauseClean clauseCleaningType)
     };
 }
 
+class GaussConf
+{
+    public:
+
+    GaussConf() :
+        decision_until(700)
+        , autodisable(true)
+        , max_matrix_rows(5000)
+        , min_matrix_rows(2)
+        , max_num_matrixes(5)
+    {
+    }
+
+    uint32_t decision_until; //do Gauss until this level
+    bool autodisable;
+    uint32_t max_matrix_rows; //The maximum matrix size -- no. of rows
+    uint32_t min_matrix_rows; //The minimum matrix size -- no. of rows
+    uint32_t max_num_matrixes; //Maximum number of matrixes
+
+    //Matrix extraction config
+    bool doMatrixFind = true;
+    uint32_t min_gauss_xor_clauses = 2;
+    uint32_t max_gauss_xor_clauses = 500000;
+};
+
 class DLL_PUBLIC SolverConf
 {
     public:
@@ -124,9 +149,9 @@ class DLL_PUBLIC SolverConf
         ) const;
 
         //Variable activities
-        double  var_inc_start;
-        double  var_decay_start;
-        double  var_decay_max;
+        double  var_inc_vsids_start;
+        double  var_decay_vsids_start;
+        double  var_decay_vsids_max;
         double random_var_freq;
         PolarityMode polarity_mode;
 
@@ -151,7 +176,6 @@ class DLL_PUBLIC SolverConf
         double    ratio_keep_clauses[2]; ///< Remove this ratio of clauses at every database reduction round
 
         double    clause_decay;
-        unsigned  min_time_in_db_before_eligible_for_cleaning;
 
         //If too many (in percentage) low glues after min_num_confl_adjust_glue_cutoff, adjust glue lower
         double   adjust_glue_if_too_many_low;
@@ -159,31 +183,41 @@ class DLL_PUBLIC SolverConf
 
         int      guess_cl_effectiveness;
 
+        //maple
+        int      maple;
+        unsigned modulo_maple_iter;
+        bool     more_maple_bump_high_glue;
+
         //For restarting
         unsigned    restart_first;      ///<The initial restart limit.                                                                (default 100)
         double    restart_inc;        ///<The factor with which the restart limit is multiplied in each restart.                    (default 1.5)
-        unsigned   burst_search_len;
         Restart  restartType;   ///<If set, the solver will always choose the given restart strategy
         int       do_blocking_restart;
         unsigned blocking_restart_trail_hist_length;
         double   blocking_restart_multip;
-        int      maple;
+        int      broken_glue_restart;
 
         double   local_glue_multiplier;
         unsigned  shortTermHistorySize; ///< Rolling avg. glue window size
         unsigned lower_bound_for_blocking_restart;
         double   ratio_glue_geom; //higher the number, the more glue will be done. 2 is 2x glue 1x geom
+        int more_more_with_cache;
+        int more_more_with_stamp;
+        int doAlwaysFMinim;
 
         //Clause minimisation
         int doRecursiveMinim;
         int doMinimRedMore;  ///<Perform learnt clause minimisation using watchists' binary and tertiary clauses? ("strong minimization" in PrecoSat)
+        int doMinimRedMoreMore;
         unsigned max_glue_more_minim;
         unsigned max_size_more_minim;
+        unsigned more_red_minim_limit_cache;
+        unsigned more_red_minim_limit_binary;
+        unsigned max_num_lits_more_more_red_min;
 
         //Verbosity
-        int  verbosity;  ///<Verbosity level. 0=silent, 1=some progress report, 2=lots of report, 3 = all report       (default 2) preferentiality is turned off (i.e. picked randomly between [0, all])
+        int  verbosity;  ///<Verbosity level. 0=silent, 1=some progress report, 2=lots of report, 3 = all report       (default 2)
         int  doPrintGateDot; ///< Print DOT file of gates
-        int  doPrintConflDot; ///< Print DOT file for each conflict
         int  print_full_restart_stat;
         int  print_all_restarts;
         int  verbStats;
@@ -201,11 +235,15 @@ class DLL_PUBLIC SolverConf
         int       otfHyperbin;
         int       doOTFSubsume;
         int       doOTFSubsumeOnlyAtOrBelowGlue;
-        int       rewardShortenedClauseWithConfl; //Shortened through OTF subsumption
+
+        //decision-based conflict clause generation
+        int       do_decision_based_cl;
+        uint32_t  decision_based_cl_max_levels;
+        uint32_t  decision_based_cl_min_learned_size;
 
         //SQL
-        bool      dump_individual_search_time;
         bool      dump_individual_restarts_and_clauses;
+        double    dump_individual_cldata_ratio;
 
         //Steps
         double orig_step_size = 0.40;
@@ -255,15 +293,16 @@ class DLL_PUBLIC SolverConf
         //XORs
         int      doFindXors;
         unsigned maxXorToFind;
+        unsigned maxXorToFindSlow;
         int      useCacheWhenFindingXors;
-        int      doEchelonizeXOR;
-        unsigned long long  maxXORMatrix;
-        long long xor_finder_time_limitM;
+        uint64_t maxXORMatrix;
+        uint64_t xor_finder_time_limitM;
+        int      allow_elim_xor_vars;
+        unsigned xor_var_per_cut;
 
         //Var-replacement
         int doFindAndReplaceEqLits;
         int doExtendedSCC;
-        double sccFindPercent;
         int max_scc_depth;
 
         //Iterative Alo Scheduling
@@ -297,6 +336,7 @@ class DLL_PUBLIC SolverConf
         //Memory savings
         int       doRenumberVars;
         int       doSaveMem;
+        uint64_t  full_watch_consolidate_every_n_confl;
 
         //Component handling
         int       doCompHandler;
@@ -322,6 +362,7 @@ class DLL_PUBLIC SolverConf
 
         //Gauss
         GaussConf gaussconf;
+        bool dont_elim_xor_vars;
 
         //Greedy undef
         int      greedy_undef;
@@ -332,6 +373,7 @@ class DLL_PUBLIC SolverConf
         double global_timeout_multiplier;
         double global_timeout_multiplier_multiplier;
         double global_multiplier_multiplier_max;
+        double var_and_mem_out_mult;
 
         //Misc
         unsigned origSeed;
@@ -339,6 +381,8 @@ class DLL_PUBLIC SolverConf
         unsigned reconfigure_val;
         unsigned reconfigure_at;
         unsigned preprocess;
+        int      simulate_drat;
+        int      need_decisions_reaching;
         std::string simplified_cnf;
         std::string solution_file;
         std::string saved_state_file;

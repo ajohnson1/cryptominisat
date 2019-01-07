@@ -29,7 +29,6 @@ from random import choice
 import optparse
 import glob
 import resource
-import locale
 from verifier import *
 from functools import partial
 
@@ -85,15 +84,25 @@ def set_up_parser():
                       action="store_true",
                       help="Don't run 'large' fuzzer"
                       " (may mem-out on smaller systems)")
+    parser.add_option("--gauss", dest="gauss", default=False,
+                      action="store_true",
+                      help="Concentrate fuzzing gauss")
+    parser.add_option("--indep", dest="only_indep", default=False,
+                      action="store_true",
+                      help="Concentrate fuzzing independent variables")
+    parser.add_option("--dump", dest="only_dump", default=False,
+                      action="store_true",
+                      help="Concentrate fuzzing dumped clauses")
 
-    parser.add_option("--sqlite", dest="sqlite", default=False,
-                      action="store_true", help="Test SQLite dumping")
-
-    parser.add_option("--maxthreads", dest="max_threads", default=100,
+    parser.add_option("--maxth", "-m", dest="max_threads", default=100,
                       type=int, help="Max number of threads")
 
     parser.add_option("--tout", "-t", dest="maxtime", type=int, default=35,
                       help="Max time to run. Default: %default")
+
+    parser.add_option("--nopreproc", dest="nopreproc", default=False,
+                      action="store_true",
+                      help="Don't run preprocessing check only NORMAL")
 
     parser.add_option("--textra", dest="maxtimediff", type=int, default=10,
                       help="Extra time on top of timeout for processing."
@@ -141,7 +150,7 @@ class create_fuzz:
             fixed = random.getrandbits(1) == 1
 
             for _ in range(random.randrange(2, 4)):
-                fname2 = unique_file("fuzzTest")
+                fname2 = unique_file("fuzzTest-multipart")
                 fnames_multi.append(fname2)
 
                 # chose a ranom fuzzer, not multipart
@@ -198,9 +207,18 @@ class Tester:
 
     def __init__(self):
         self.ignoreNoSolution = False
-        self.extra_options_if_supported = self.list_options_if_supported(
-            ["xor", "autodisablegauss"])
+        self.extra_opts_supported = self.list_options_if_supported(
+            ["xor", "autodisablegauss", "sql", "clid"])
         self.sol_parser = solution_parser(options)
+        self.sqlitedbfname = None
+        self.clid_added = False
+        self.only_indep = False
+        self.indep_vars = []
+        self.dump_red = None
+        self.decisions_dumpfile = None
+        self.this_gauss_on = False
+        self.num_threads = 1
+        self.preproc = False
 
     def list_options_if_supported(self, tocheck):
         ret = []
@@ -238,9 +256,10 @@ class Tester:
         for _ in range(int(random.gammavariate(12, 0.7))):
             sched.append(random.choice(opts))
 
-        if "autodisablegauss" in self.extra_options_if_supported:
+        # just so that XOR is really found and used, so we can fuzz it
+        if "autodisablegauss" in self.extra_opts_supported:
             if random.choice([False, True, True, True]) and self.this_gauss_on:
-                sched.append("occ-gauss")
+                sched.append("occ-xor")
 
         return sched
 
@@ -267,18 +286,48 @@ class Tester:
         return cmd
 
     def random_options(self, preproc=False):
+        self.sqlitedbfname = None
+        self.clid_added = False
         cmd = " --zero-exit-status "
+        if self.decisions_dumpfile is None:
+            self.decisions_dumpfile = unique_file("fuzz-decdump", ".txt")
+            cmd += "--dumpdecformodel %s " % self.decisions_dumpfile
 
         # disable gauss when gauss is compiled in but asked not to be used
-        if not self.this_gauss_on and "autodisablegauss" in self.extra_options_if_supported:
+        if not self.this_gauss_on and "autodisablegauss" in self.extra_opts_supported:
             cmd += "--maxgaussdepth 0 "
 
-        if random.choice([True, False]):
-            cmd += "--maple %d " % random.choice([0, 0, 0, 1])
-            cmd += "--reconf %d " % random.choice([3, 6, 7, 12, 13, 14])
+        # note, presimp=0 is braindead for preproc but it's mostly 1 so OK
+        cmd += "--presimp %d " % random.choice([1, 1, 1, 1, 1, 1, 1, 0])
+        cmd += "--confbtwsimp %d " % random.choice([100, 1000])
+        cmd += "--everylev1 %d " % random.choice([122, 1222, 12222])
+        cmd += "--everylev2 %d " % random.choice([133, 1333, 14444])
+
+        if self.dump_red is not None:
+            cmd += "--dumpred %s " % self.dump_red
+            cmd += "--dumpredmaxlen %d " % random.choice([2, 10, 100, 100000])
+            cmd += "--dumpredmaxglue %d " % random.choice([2, 10, 100, 100000])
+
+        if self.only_indep:
+            cmd += "--onlyindep "
+            cmd += "--indep "
+            cmd += ",".join(["%s" % x for x in self.indep_vars]) + " "
+
+        if random.choice([True, False]) and "clid" in self.extra_opts_supported:
+            cmd += "--varsperxorcut %d " % random.randint(4, 6)
+            cmd += "--xorcache %d " % random.choice([0, 1])
+            if random.choice([True, True, True, False]):
+                self.clid_added = True
+                cmd += "--clid "
+            cmd += "--locgmult %.12f " % random.gammavariate(0.5, 0.7)
+            cmd += "--varelimover %d " % random.gammavariate(1, 20)
+            cmd += "--memoutmult %0.12f " % random.gammavariate(0.03, 50)
+            cmd += "--verb %d " % random.choice([0, 0, 0, 0, 1, 2])
+            cmd += "--maple %d " % random.choice([0, 1])
+            if random.randint(0, 2) == 1:
+                cmd += "--reconf %d " % random.choice([3, 4, 6, 7, 12, 13, 14, 15, 16])
             # cmd += "--undef %d " % random.choice([0, 1])
             cmd += " --reconfat %d " % random.randint(0, 2)
-            cmd += "--burst %d " % random.choice([0, 100, random.randint(0, 10000)])
             cmd += "--ml  %s " % random.randint(0, 10)
             cmd += "--restart %s " % random.choice(
                 ["geom", "glue", "luby"])
@@ -288,7 +337,6 @@ class Tester:
             cmd += "--otfhyper %s " % random.randint(0, 1)
             # cmd += "--clean %s " % random.choice(["size", "glue", "activity",
             # "prconf"])
-            cmd += "--rewardotfsubsume %s " % random.randint(0, 100)
             cmd += "--bothprop %s " % random.randint(0, 1)
             cmd += "--probemaxm %s " % random.choice([0, 10, 100, 1000])
             cmd += "--cachesize %s " % random.randint(10, 100)
@@ -308,7 +356,13 @@ class Tester:
             cmd += "--implsubsto %s " % random.choice([0, 10, 1000])
             cmd += "--sync %d " % random.choice([100, 1000, 6000, 100000])
             cmd += "-m %0.12f " % random.gammavariate(0.1, 5.0)
-            # gammavariate gives us sometimes very low values, sometimes large
+            cmd += "--maxsccdepth %d " % random.choice([0, 1, 100, 100000])
+
+            # more more minim
+            cmd += "--moremoreminim %d " % random.choice([1, 1, 1, 0])
+            cmd += "--moremorecachelimit %d " % int(random.gammavariate(1, 6))
+            cmd += "--moremorestamp %d " % random.choice([1, 1, 1, 0])
+            cmd += "--moremorealways %d " % random.choice([1, 1, 1, 0])
 
             if self.this_gauss_on:
                 # Reduce iteratively the matrix that is updated
@@ -320,7 +374,7 @@ class Tester:
                 # Set maximum no. of rows for gaussian matrix."
                 cmd += "--maxmatrixrows %s " % int(random.gammavariate(5, 15.0))
 
-                #, "Automatically disable gauss when performing badly")
+                # "Automatically disable gauss when performing badly")
                 cmd += "--autodisablegauss %s " % random.choice([0, 1])
 
                 # "Set minimum no. of rows for gaussian matrix.
@@ -332,19 +386,20 @@ class Tester:
                 # "Maximum number of matrixes to treat.")
                 cmd += "--maxnummatrixes %s " % int(random.gammavariate(1, 10.0))
 
-            if options.sqlite:
+            if "sql" in self.extra_opts_supported and random.randint(0, 3) > 0 and self.num_threads == 1 and not self.preproc:
                 cmd += "--sql 2 "
-                cmd += "--sqlrestfull %d " % random.choice([0, 1])
-                cmd += "--sqlresttime %d " % random.choice([0, 1])
+                self.sqlitedbfname = unique_file("fuzz", ".sqlitedb")
+                cmd += "--sqlitedb %s " % self.sqlitedbfname
+                cmd += "--cldatadumpratio %0.3f " % random.choice([0.9, 0.1, 0.7])
 
         # the most buggy ones, don't turn them off much, please
         if random.choice([True, False]):
             opts = ["scc", "varelim", "comps", "strengthen", "probe", "intree",
                     "stamp", "cache", "otfsubsume",
                     "renumber", "savemem", "moreminim", "gates", "bva",
-                    "gorshort", "gandrem", "gateeqlit", "schedsimp", "presimp"]
+                    "gorshort", "gandrem", "gateeqlit", "schedsimp"]
 
-            if "xor" in self.extra_options_if_supported:
+            if "xor" in self.extra_opts_supported:
                 opts.append("xor")
 
             for opt in opts:
@@ -374,16 +429,14 @@ class Tester:
         command += rnd_opts
         if self.needDebugLib:
             command += "--debuglib %s " % fname
-        if not options.verbose:
-            command += "--verb 0 "
         command += "--threads %d " % self.num_threads
         command += options.extra_options + " "
         command += fixed_opts + " "
         if fname is not None:
-            command += fname
+            command += "--input %s " % fname
         if fname2:
             if self.drat:
-                command += " %s " % fname2
+                command += " --drat %s " % fname2
             else:
                 command += " %s --savedstate %s-savedstate.dat " % (fname2, fname2)
 
@@ -414,7 +467,9 @@ class Tester:
             found_something = False
             for line in err_file:
                 print("Error line while executing: %s" % line.strip())
-                if "std::_Ios_Fmtflags" in line or "mzd.h" in line or "lexical_cast.hpp" in line:
+                # don't error out on issues related to UBSAN/ASAN
+                # of clang of other projects
+                if "std::_Ios_Fmtflags" in line or "mzd.h" in line or "lexical_cast.hpp" in line or "MersenneTwister.h" in line:
                     pass
                 else:
                     found_something = True
@@ -423,12 +478,83 @@ class Tester:
                 exit(-1)
 
         os.unlink(err_fname)
+        if self.sqlitedbfname is not None:
+            os.unlink(self.sqlitedbfname)
 
         if options.verbose:
             print("CPU limit of parent (pid %d) after child finished executing: %s" %
                   (os.getpid(), resource.getrlimit(resource.RLIMIT_CPU)))
 
         return consoleOutput, retcode
+
+    def check_decisions(self, solution, fname):
+
+        with open(self.decisions_dumpfile, "r") as f:
+            for line in f:
+                if "INVALID" in line:
+                    print("Cannot check decisions, as it's INVALID")
+                    return
+
+        x = Tester()
+        x.needDebugLib = False
+        consoleOutput, retcode = x.execute(
+            fname,
+            fixed_opts=" --zero-exit-status --input %s " % self.decisions_dumpfile,
+            rnd_opts=" ")
+
+        if retcode != 0:
+            print("ERROR while running decision-injected solver, retcode: ", retcode)
+            exit(-1)
+
+        unsat, solution2, _ = x.sol_parser.parse_solution_from_output(
+            consoleOutput.split("\n"), ignoreNoSolution=False)
+
+        if unsat:
+            print("ERROR: after injecting the decisions, the problem is UNSAT")
+            exit(-1)
+
+        bad = False
+        for key, val in solution.items():
+            if key not in solution2:
+                bad = True
+                print("ERROR: variable %d is not in the second solution" % key)
+                break
+            if solution[key] != solution2[key]:
+                print("ERROR: variable %d does not have the same solutions." % key)
+                print("ERROR: original: %s" % solution[key])
+                print("ERROR: decision-injected: %s" % solution2[key])
+                bad = True
+
+        if bad:
+            print("The solution is not the same after injecting decisions!")
+            print("Original solution:", solution)
+            print("New      solution:", solution2)
+            exit(-1)
+
+        print("OK, decisions verified")
+
+        x = Tester()
+        x.needDebugLib = False
+        consoleOutput, retcode = x.execute(
+            fname,
+            fixed_opts=" --zero-exit-status --input %s --maxsol 10 " % self.decisions_dumpfile,
+            rnd_opts=" ")
+
+        found_one = False
+        for line in consoleOutput.split("\n"):
+            m = re.match(r".*Number of solutions found until now:[ ]*([^ ]+)", line)
+            if m is not None:
+                num = int(m.group(1))
+                if num == 1:
+                    found_one = True
+                if num > 1:
+                    print("ERROR: we found more than 1 solution given the set of decisions")
+                    exit(-1)
+        if not found_one:
+            print("ERROR: Did not even find one solution for multi-solution with decisions")
+            exit(-1)
+
+        print("OK, number of decision-restricted solutions verified")
 
     def check(self, fname, fname2=None,
               checkAgainst=None,
@@ -478,12 +604,35 @@ class Tester:
             return True
 
         if not unsat:
-            self.sol_parser.test_found_solution(solution, checkAgainst)
+            if len(self.indep_vars) != 0:
+                self.sol_parser.indep_vars_solution_check(fname, self.indep_vars, solution)
+            else:
+                self.sol_parser.test_found_solution(solution, checkAgainst)
+
+            if self.dump_red:
+                self.check_dumped_clauses(fname)
+
+            if self.decisions_dumpfile is not None and checkAgainst == fname:
+                if len(self.indep_vars) == 0:
+                    self.check_decisions(solution, fname)
+
+            if self.decisions_dumpfile is not None:
+                os.unlink(self.decisions_dumpfile)
+                self.decisions_dumpfile = None
+
             return
+
+        if self.decisions_dumpfile is not None:
+            os.unlink(self.decisions_dumpfile)
+            self.decisions_dumpfile = None
 
         # it's UNSAT, let's check with DRAT
         if fname2:
-            toexec = "../../build/tests/drat-trim/drat-trim %s %s" % (fname, fname2)
+            toexec = "../../build/tests/drat-trim/drat-trim {cnf} {dratf} {opt}"
+            opt = ""
+            if self.clid_added:
+                opt = "-i "
+            toexec = toexec.format(cnf=fname, dratf=fname2, opt=opt)
             print("Checking DRAT...: ", toexec)
             p = subprocess.Popen(toexec.rsplit(),
                     stdout=subprocess.PIPE,
@@ -522,15 +671,70 @@ class Tester:
             print("Grave bug: SAT-> UNSAT : Other solver found solution!!")
             exit()
 
+    def check_dumped_clauses(self, fname):
+        assert self.dump_red is not None
+
+        tmpfname = unique_file("fuzzTest-dump-test")
+        with open(tmpfname, "w") as tmpf:
+            with open(fname, "r") as x:
+                for line in x:
+                    line = line.strip()
+                    if "c" in line or "p" in line:
+                        continue
+                    tmpf.write(line+"\n")
+
+            with open(self.dump_red, "r") as x:
+                for line in x:
+                    line = line.strip()
+                    tmpf.write(line+"\n")
+
+        print("[dump-check] dump-combined file is: ", tmpfname)
+        if options.verbose:
+            print("dump file is:     ", self.dump_red)
+            print("orig file is:     ",  fname)
+
+        self.old_dump_red = str(self.dump_red)
+        self.dump_red = None
+        self.indep_vars = []
+        self.only_indep = False
+        self.check(tmpfname, checkAgainst=fname)
+
+        os.unlink(tmpfname)
+        os.unlink(self.old_dump_red)
+        print("[dump-check] OK, solution after DUMP has been injected is still OK")
+
     def fuzz_test_one(self):
         print("--- NORMAL TESTING ---")
-        self.num_threads = random.choice([1, 2, 4])
+        self.decisions_dumpfile = None
+        self.num_threads = random.choice([1, 1, 1, 1, 1, 1, 4])
         self.num_threads = min(options.max_threads, self.num_threads)
-        self.this_gauss_on = "autodisablegauss" in self.extra_options_if_supported and random.choice([True, False, False, False, False])
-        self.drat = self.num_threads == 1 and random.choice([True, False]) and (not self.this_gauss_on)
+        self.this_gauss_on = "autodisablegauss" in self.extra_opts_supported and random.choice([True, False, False])
+        if options.gauss:
+            self.this_gauss_on = True
+            assert "autodisablegauss" in self.extra_opts_supported
+
+        self.drat = self.num_threads == 1 and random.randint(0, 10) < 5 and (not self.this_gauss_on)
+        self.sqlitedbfname = None
+        self.preproc = False
+        self.dump_red = random.choice([None, None, None, None, None, True])
+        if self.dump_red is not None:
+            self.dump_red = unique_file("fuzzTest-dump")
+        self.only_indep = random.choice([True, False, False, False, False]) and not self.drat
+
+        if options.only_indep:
+            self.drat = False
+            self.only_indep = True
+
+        if options.only_dump:
+            self.drat = False
+            self.only_indep = False
+            if self.dump_red is None:
+                self.dump_red = unique_file("fuzzTest-dump")
 
         if self.drat:
             fuzzers = fuzzers_drat
+        elif options.gauss:
+            fuzzers = fuzzers_xor
         else:
             fuzzers = fuzzers_nodrat
         fuzzer = random.choice(fuzzers)
@@ -538,7 +742,7 @@ class Tester:
         fname = unique_file("fuzzTest")
         fname_drat = None
         if self.drat:
-            fname_drat = "%s-drat" % fname
+            fname_drat = unique_file("fuzzTest-drat")
 
         # create the fuzz file
         cf = create_fuzz()
@@ -548,9 +752,10 @@ class Tester:
         if status != 0:
             fuzzer_call_failed(fname)
 
-        if not self.drat:
+        if not self.drat and not self.only_indep and not self.dump_red:
+            print("->Multipart test")
             self.needDebugLib = True
-            interspersed_fname = unique_file("fuzzTest")
+            interspersed_fname = unique_file("fuzzTest-interspersed")
             seed_for_inters = random.randint(0, 1000000)
             intersperse(fname, interspersed_fname, seed_for_inters)
             print("Interspersed: ./intersperse.py %s %s %d" % (fname,
@@ -561,14 +766,36 @@ class Tester:
             self.needDebugLib = False
             interspersed_fname = fname
 
+        # calculate indep vars
+        self.indep_vars = []
+        if self.only_indep:
+            max_vars = self.sol_parser.max_vars_in_file(fname)
+            assert max_vars > 0
+
+            self.indep_vars = []
+            myset = {}
+            for _ in range(random.randint(1, 50)):
+                x = random.randint(1, max_vars)
+                if x not in myset:
+                    self.indep_vars.append(x)
+                    myset[x] = 1
+
+            # don't do it for 0-length indep vars
+            if len(self.indep_vars) == 0:
+                self.only_indep = False
+
         self.check(fname=interspersed_fname, fname2=fname_drat)
 
         # remove temporary filenames
         os.unlink(interspersed_fname)
-        for name in todel:
-            os.unlink(name)
         if fname_drat:
             os.unlink(fname_drat)
+        for name in todel:
+            os.unlink(name)
+
+        if self.dump_red is not None:
+            os.unlink(self.dump_red)
+            self.dump_red = None
 
     def delete_file_no_matter_what(self, fname):
         try:
@@ -578,12 +805,19 @@ class Tester:
 
     def fuzz_test_preproc(self):
         print("--- PREPROC TESTING ---")
-        self.this_gauss_on = False # don't do gauss on preproc
+        self.decisions_dumpfile = True  # so it is not None
+        self.this_gauss_on = False  # don't do gauss on preproc
+        assert self == tester
         tester.needDebugLib = False
         fuzzer = random.choice(fuzzers_drat)
         self.num_threads = 1
-        fname = unique_file("fuzzTest")
+        fname = unique_file("fuzzTest-preproc")
         self.drat = False
+        self.preproc = True
+        self.only_indep = False
+        self.indep_vars = []
+        assert self.dump_red is None
+        self.dump_red = None
 
         # create the fuzz file
         cf = create_fuzz()
@@ -617,9 +851,11 @@ class Tester:
             if ret is not None:
                 # didn't time out, so let's reconstruct the solution
                 savedstate = "%s-savedstate.dat" % simp
-                self.check(fname=solution, checkAgainst=fname,
-                           fixed_opts="--preproc 2 --savedstate %s" % savedstate,
-                           rnd_opts=rnd_opts)
+                x = Tester()
+                x.needDebugLib = False
+                x.check(fname=solution, checkAgainst=fname,
+                        fixed_opts="--preproc 2 --savedstate %s" % savedstate,
+                        rnd_opts=rnd_opts)
                 os.unlink(savedstate)
                 os.unlink(solution)
 
@@ -627,6 +863,7 @@ class Tester:
         os.unlink(fname)
         for name in todel:
             os.unlink(name)
+        assert self.dump_red is None
 
 
 def filter_large_fuzzer(dat):
@@ -674,8 +911,6 @@ fuzzers_xor = [
 
 
 if __name__ == "__main__":
-    global options
-    global args
     global fuzzers_drat
     global fuzzers_nodrat
     if not os.path.isdir("out"):
@@ -704,23 +939,35 @@ if __name__ == "__main__":
         rnd_seed = random.randint(0, 1000*1000*100)
 
     while True:
-        toexec = "./fuzz_test.py --fuzzlim 1 --seed %d" % rnd_seed
+        toexec = "./fuzz_test.py --fuzzlim 1 --seed %d " % rnd_seed
         if options.novalgrind:
-            toexec += " --novalgrind"
+            toexec += "--novalgrind "
         if options.valgrind_freq:
-            toexec += " --valgrindfreq %d" % options.valgrind_freq
+            toexec += "--valgrindfreq %d " % options.valgrind_freq
         if options.small:
-            toexec += " --small"
+            toexec += "--small "
+        if options.gauss:
+            toexec += "--gauss "
+        if options.only_indep:
+            toexec += "--indep "
+        if options.only_dump:
+            toexec += "--dump "
+        if options.nopreproc:
+            toexec += "--nopreproc "
+        toexec += "-m %d " % options.max_threads
 
         print("")
         print("")
         print("--> To re-create fuzz-test below: %s" % toexec)
 
         random.seed(rnd_seed)
-        if random.choice([True, False]):
-            tester.fuzz_test_preproc()
-        else:
+        if options.nopreproc:
             tester.fuzz_test_one()
+        else:
+            if random.randint(0, 10) == 0:
+                tester.fuzz_test_preproc()
+            else:
+                tester.fuzz_test_one()
         rnd_seed += 1
         num += 1
         if options.fuzz_test_lim is not None and num >= options.fuzz_test_lim:

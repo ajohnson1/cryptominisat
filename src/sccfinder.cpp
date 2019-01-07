@@ -82,13 +82,12 @@ bool SCCFinder::performSCC(uint64_t* bogoprops_given)
             runStats.print_short(solver);
     }
     globalStats += runStats;
-    solver->binTri.numNewBinsSinceSCC = 0;
 
     if (bogoprops_given) {
         *bogoprops_given += runStats.bogoprops;
     }
 
-    return solver->ok;
+    return solver->okay();
 }
 
 void SCCFinder::tarjan(const uint32_t vertex)
@@ -117,7 +116,8 @@ void SCCFinder::tarjan(const uint32_t vertex)
     vector<LitExtra>* transCache = NULL;
     if (solver->conf.doCache
         && solver->conf.doExtendedSCC
-        && (!solver->drat->enabled() || solver->conf.otfHyperbin)
+        && (!(solver->drat->enabled() || solver->conf.simulate_drat) ||
+            solver->conf.otfHyperbin)
     ) {
         transCache = &(solver->implCache[~vertLit].lits);
         __builtin_prefetch(transCache->data());

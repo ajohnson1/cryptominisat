@@ -69,6 +69,7 @@ namespace CMSat {
         CMSatPrivateData& operator=(const CMSatPrivateData&) = delete;
 
         vector<Solver*> solvers;
+        vector<double> cpu_times;
         SharedData *shared_data = NULL;
         int which_solved = 0;
         std::atomic<bool>* must_interrupt;
@@ -80,6 +81,7 @@ namespace CMSat {
         std::ofstream* log = NULL;
         int sql = 0;
         double timeout = std::numeric_limits<double>::max();
+        bool interrupted = false;
 
         uint64_t previous_sum_conflicts = 0;
         uint64_t previous_sum_propagations = 0;
@@ -91,6 +93,7 @@ struct DataForThread
 {
     explicit DataForThread(CMSatPrivateData* data, const vector<Lit>* _assumptions = NULL) :
         solvers(data->solvers)
+        , cpu_times(data->cpu_times)
         , lits_to_add(&(data->cls_lits))
         , vars_to_add(data->vars_to_add)
         , assumptions(_assumptions)
@@ -106,6 +109,7 @@ struct DataForThread
         delete ret;
     }
     vector<Solver*>& solvers;
+    vector<double>& cpu_times;
     vector<Lit> *lits_to_add;
     uint32_t vars_to_add;
     const vector<Lit> *assumptions;
@@ -122,9 +126,14 @@ DLL_PUBLIC SATSolver::SATSolver(
     data = new CMSatPrivateData(interrupt_asap);
 
     if (config && ((SolverConf*) config)->verbosity) {
-        print_thread_start_and_finish = true;
+        //NOT SAFE
+        //yes -- this system will use a lock, but the solver itself won't(!)
+        //so things will get mangled and printed wrongly
+        //print_thread_start_and_finish = true;
     }
+
     data->solvers.push_back(new Solver((SolverConf*) config, data->must_interrupt));
+    data->cpu_times.push_back(0.0);
 }
 
 DLL_PUBLIC SATSolver::~SATSolver()
@@ -134,16 +143,21 @@ DLL_PUBLIC SATSolver::~SATSolver()
 
 void update_config(SolverConf& conf, unsigned thread_num)
 {
-    thread_num = thread_num % 20;
-
     //Don't accidentally reconfigure everything to a specific value!
     if (thread_num > 0) {
         conf.reconfigure_val = 0;
     }
+    conf.origSeed += thread_num;
 
-    switch(thread_num) {
+    switch(thread_num % 23) {
+        case 0: {
+            //default setup
+            break;
+        }
+
         case 1: {
             //Minisat-like
+            conf.maple = 0;
             conf.varElimRatioPerIter = 1;
             conf.restartType = Restart::geom;
             conf.polarity_mode = CMSat::PolarityMode::polarmode_neg;
@@ -154,16 +168,24 @@ void update_config(SolverConf& conf, unsigned thread_num)
             break;
         }
         case 2: {
+            conf.maple = 1;
+            conf.modulo_maple_iter = 100;
+            break;
+        }
+        case 3: {
             //Similar to CMS 2.9 except we look at learnt DB size insteead
             //of conflicts to see if we need to clean.
+            conf.maple = 0;
             conf.ratio_keep_clauses[clean_to_int(ClauseClean::glue)] = 0.5;
             conf.ratio_keep_clauses[clean_to_int(ClauseClean::activity)] = 0;
             conf.glue_put_lev0_if_below_or_eq = 0;
             conf.inc_max_temp_lev2_red_cls = 1.03;
             break;
         }
-        case 3: {
+        case 4: {
             //Similar to CMS 5.0
+            conf.maple = 0;
+            conf.varElimRatioPerIter = 0.4;
             conf.every_lev1_reduce = 0;
             conf.every_lev2_reduce = 0;
             conf.max_temp_lev2_learnt_clauses = 30000;
@@ -173,67 +195,47 @@ void update_config(SolverConf& conf, unsigned thread_num)
             conf.ratio_keep_clauses[clean_to_int(ClauseClean::activity)] = 0.5;
             break;
         }
-        case 4: {
+        case 5: {
+            conf.maple = 0;
             conf.never_stop_search = true;
             break;
         }
-        case 5: {
-            //conf.max_temporary_learnt_clauses = 10000;
+        case 6: {
+            //Maple with backtrack
+            conf.maple = 1;
+            conf.modulo_maple_iter = 100;
             break;
         }
-        case 6: {
-            conf.do_bva = false;
+        case 7: {
+            conf.maple = 0;
+            conf.do_bva = true;
             conf.glue_put_lev0_if_below_or_eq = 2;
             conf.varElimRatioPerIter = 1;
             conf.inc_max_temp_lev2_red_cls = 1.04;
             conf.ratio_keep_clauses[clean_to_int(ClauseClean::glue)] = 0.1;
             conf.ratio_keep_clauses[clean_to_int(ClauseClean::activity)] = 0.3;
-            conf.var_decay_max = 0.90; //more 'slow' in adjusting activities
-            break;
-        }
-
-        case 7: {
-            conf.global_timeout_multiplier = 5;
-            conf.num_conflicts_of_search_inc = 1.15;
-            //conf.max_temporary_learnt_clauses = 10000;
-            conf.var_decay_max = 0.99; //more 'fast' in adjusting activities
+            conf.var_decay_vsids_max = 0.90; //more 'slow' in adjusting activities
             break;
         }
         case 8: {
             //Different glue limit
-            conf.glue_put_lev0_if_below_or_eq = 4;
-            //conf.glue_put_lev2_if_below_or_eq = 8;
-            conf.max_glue_more_minim = 4;
-            break;
-        }
-        case 9: {
-            //Different glue limit
+            conf.maple = 0;
             conf.glue_put_lev0_if_below_or_eq = 2;
             conf.glue_put_lev1_if_below_or_eq = 2;
             break;
         }
+        case 9: {
+            conf.maple = 0;
+            conf.var_decay_vsids_max = 0.998;
+            break;
+        }
         case 10: {
-            //Luby
-            conf.restart_inc = 1.5;
-            conf.restart_first = 100;
-            conf.restartType = CMSat::Restart::luby;
-            break;
-        }
-        case 11: {
-            conf.glue_put_lev0_if_below_or_eq = 3;
-            conf.glue_put_lev1_if_below_or_eq = 5;
-            conf.var_decay_max = 0.97;
-            break;
-        }
-        case 12: {
-            conf.var_decay_max = 0.998;
-            break;
-        }
-        case 13: {
+            conf.maple = 0;
             conf.polarity_mode = CMSat::PolarityMode::polarmode_pos;
             break;
         }
-        case 14: {
+        case 11: {
+            conf.maple = 0;
             conf.varElimRatioPerIter = 1;
             conf.restartType = Restart::geom;
 
@@ -242,12 +244,126 @@ void update_config(SolverConf& conf, unsigned thread_num)
             conf.ratio_keep_clauses[clean_to_int(ClauseClean::activity)] = 0.3;
             break;
         }
-        case 15: {
+        case 12: {
+            conf.maple = 0;
             conf.inc_max_temp_lev2_red_cls = 1.001;
             break;
         }
 
+        case 13: {
+            //Minisat-like
+            conf.maple = 1;
+            conf.varElimRatioPerIter = 1;
+            conf.restartType = Restart::geom;
+            conf.polarity_mode = CMSat::PolarityMode::polarmode_neg;
+
+            conf.inc_max_temp_lev2_red_cls = 1.02;
+            conf.ratio_keep_clauses[clean_to_int(ClauseClean::glue)] = 0;
+            conf.ratio_keep_clauses[clean_to_int(ClauseClean::activity)] = 0.5;
+            break;
+        }
+        case 14: {
+            //Different glue limit
+            conf.maple = 0;
+            conf.doMinimRedMoreMore = 1;
+            conf.glue_put_lev0_if_below_or_eq = 4;
+            //conf.glue_put_lev2_if_below_or_eq = 8;
+            conf.max_num_lits_more_more_red_min = 3;
+            conf.max_glue_more_minim = 4;
+            break;
+        }
+        case 15: {
+            //Similar to CMS 2.9 except we look at learnt DB size insteead
+            //of conflicts to see if we need to clean.
+            conf.maple = 1;
+            conf.ratio_keep_clauses[clean_to_int(ClauseClean::glue)] = 0.5;
+            conf.ratio_keep_clauses[clean_to_int(ClauseClean::activity)] = 0;
+            conf.glue_put_lev0_if_below_or_eq = 0;
+            conf.inc_max_temp_lev2_red_cls = 1.03;
+            break;
+        }
+        case 16: {
+            //Similar to CMS 5.0
+            conf.maple = 1;
+            conf.varElimRatioPerIter = 0.4;
+            conf.every_lev1_reduce = 0;
+            conf.every_lev2_reduce = 0;
+            conf.max_temp_lev2_learnt_clauses = 30000;
+            conf.glue_put_lev0_if_below_or_eq = 4;
+
+            conf.ratio_keep_clauses[clean_to_int(ClauseClean::glue)] = 0;
+            conf.ratio_keep_clauses[clean_to_int(ClauseClean::activity)] = 0.5;
+            break;
+        }
+        case 17: {
+            //conf.max_temporary_learnt_clauses = 10000;
+            conf.do_bva = true;
+            break;
+        }
+        case 18: {
+            conf.maple = 0;
+            conf.every_lev1_reduce = 0;
+            conf.every_lev2_reduce = 0;
+            conf.glue_put_lev1_if_below_or_eq = 0;
+            conf.max_temp_lev2_learnt_clauses = 10000;
+            break;
+        }
+
+        case 19: {
+            conf.maple = 1;
+            conf.doMinimRedMoreMore = 1;
+            conf.orig_global_timeout_multiplier = 5;
+            conf.num_conflicts_of_search_inc = 1.15;
+            conf.more_red_minim_limit_cache = 1200;
+            conf.more_red_minim_limit_binary = 600;
+            conf.max_num_lits_more_more_red_min = 20;
+            //conf.max_temporary_learnt_clauses = 10000;
+            conf.var_decay_vsids_max = 0.99; //more 'fast' in adjusting activities
+            break;
+        }
+
+        case 20: {
+            //Luby
+            conf.maple = 0;
+            conf.restart_inc = 1.5;
+            conf.restart_first = 100;
+            conf.restartType = CMSat::Restart::luby;
+            break;
+        }
+
+        case 21: {
+            conf.maple = 0;
+            conf.glue_put_lev0_if_below_or_eq = 3;
+            conf.glue_put_lev1_if_below_or_eq = 5;
+            conf.var_decay_vsids_max = 0.97;
+            break;
+        }
+
+        case 22: {
+            conf.maple = 0;
+            conf.doMinimRedMoreMore = 1;
+            conf.orig_global_timeout_multiplier = 5;
+            conf.num_conflicts_of_search_inc = 1.15;
+            conf.more_red_minim_limit_cache = 1200;
+            conf.more_red_minim_limit_binary = 600;
+            conf.max_num_lits_more_more_red_min = 20;
+            //conf.max_temporary_learnt_clauses = 10000;
+            conf.var_decay_vsids_max = 0.99; //more 'fast' in adjusting activities
+            break;
+        }
+
         default: {
+            conf.maple = ((thread_num % 3) <= 1);
+            conf.modulo_maple_iter = (thread_num % 7)+1;
+            conf.varElimRatioPerIter = 0.1*(thread_num % 9);
+            if (thread_num % 4 == 0) {
+                conf.restartType = Restart::glue;
+            }
+            if (thread_num % 5 == 0) {
+                conf.restartType = Restart::geom;
+            }
+            conf.restart_first = 100 * (0.5*(thread_num % 5));
+            conf.doMinimRedMoreMore = ((thread_num % 5) == 1);
             break;
         }
     }
@@ -256,21 +372,26 @@ void update_config(SolverConf& conf, unsigned thread_num)
 DLL_PUBLIC void SATSolver::set_num_threads(unsigned num)
 {
     if (num <= 0) {
-        std::cerr << "ERROR: Number of threads must be at least 1" << endl;
-        throw std::runtime_error("ERROR: Number of threads must be at least 1");
+        const char err[] = "ERROR: Number of threads must be at least 1";
+        std::cerr << err << endl;
+        throw std::runtime_error(err);
     }
     if (num == 1) {
         return;
     }
 
-    if (data->solvers[0]->drat->enabled()) {
-        std::cerr << "ERROR: DRAT cannot be used in multi-threaded mode" << endl;
-        throw std::runtime_error("ERROR: DRAT cannot be used in multi-threaded mode");
+    if (data->solvers[0]->drat->enabled() ||
+        data->solvers[0]->conf.simulate_drat
+    ) {
+        const char err[] = "ERROR: DRAT cannot be used in multi-threaded mode";
+        std::cerr << err << endl;
+        throw std::runtime_error(err);
     }
 
     if (data->cls > 0 || nVars() > 0) {
-        std::cerr << "ERROR: You must first call set_num_threads() and only then add clauses and variables" << endl;
-        throw std::runtime_error("ERROR: You must first call set_num_threads() and only then add clauses and variables");
+        const char err[] = "ERROR: You must first call set_num_threads() and only then add clauses and variables";
+        std::cerr << err << endl;
+        throw std::runtime_error(err);
     }
 
     data->cls_lits.reserve(CACHE_SIZE);
@@ -278,6 +399,7 @@ DLL_PUBLIC void SATSolver::set_num_threads(unsigned num)
         SolverConf conf = data->solvers[0]->getConf();
         update_config(conf, i);
         data->solvers.push_back(new Solver(&conf, data->must_interrupt));
+        data->cpu_times.push_back(0.0);
     }
 
     //set shared data
@@ -370,12 +492,30 @@ static bool actually_add_clauses_to_threads(CMSatPrivateData* data)
     return ret;
 }
 
+DLL_PUBLIC void SATSolver::set_max_time(double max_time)
+{
+  for (size_t i = 0; i < data->solvers.size(); ++i) {
+    Solver& s = *data->solvers[i];
+    if (max_time >= 0) {
+      s.conf.maxTime = s.get_stats().cpu_time + max_time;
+
+      //don't allow for overflow
+      if (s.conf.maxTime < max_time)
+          s.conf.maxTime = max_time;
+    }
+  }
+}
+
 DLL_PUBLIC void SATSolver::set_max_confl(int64_t max_confl)
 {
   for (size_t i = 0; i < data->solvers.size(); ++i) {
     Solver& s = *data->solvers[i];
     if (max_confl >= 0) {
       s.conf.max_confl = s.get_stats().conflStats.numConflicts + max_confl;
+
+      //don't allow for overflow
+      if (s.conf.max_confl < max_confl)
+          s.conf.max_confl = max_confl;
     }
   }
 }
@@ -409,10 +549,11 @@ DLL_PUBLIC void SATSolver::set_allow_otf_gauss()
     #else
     for (size_t i = 0; i < data->solvers.size(); ++i) {
         Solver& s = *data->solvers[i];
-        s.conf.reconfigure_at = 0;
-        s.conf.reconfigure_val = 15;
+        //s.conf.reconfigure_at = 0;
+        //s.conf.reconfigure_val = 15;
         s.conf.gaussconf.max_num_matrixes = 10;
         s.conf.gaussconf.autodisable = false;
+        s.conf.allow_elim_xor_vars = false;
     }
     #endif
 }
@@ -441,11 +582,20 @@ DLL_PUBLIC void SATSolver::set_no_bva()
     }
 }
 
+DLL_PUBLIC void SATSolver::set_no_bve()
+{
+    for (size_t i = 0; i < data->solvers.size(); ++i) {
+        Solver& s = *data->solvers[i];
+        s.conf.doVarElim = false;
+    }
+}
+
 DLL_PUBLIC void SATSolver::set_greedy_undef()
 {
-    assert(false && "Unfortunately, greedy undef is broken");
-    std::cerr << "Unfortunately, greedy undef is broken" << endl;
+    assert(false && "ERROR: Unfortunately, greedy undef is broken, please don't use it");
+    std::cerr << "ERROR: Unfortunately, greedy undef is broken, please don't use it" << endl;
     exit(-1);
+
     for (size_t i = 0; i < data->solvers.size(); ++i) {
         Solver& s = *data->solvers[i];
         s.conf.greedy_undef = true;
@@ -463,10 +613,11 @@ DLL_PUBLIC void SATSolver::set_independent_vars(vector<uint32_t>* ind_vars)
 
 DLL_PUBLIC void SATSolver::set_verbosity(unsigned verbosity)
 {
-  for (size_t i = 0; i < data->solvers.size(); ++i) {
-    Solver& s = *data->solvers[i];
+    if (data->solvers.empty())
+        return;
+
+    Solver& s = *data->solvers[0];
     s.conf.verbosity = verbosity;
-  }
 }
 
 DLL_PUBLIC void SATSolver::set_timeout_all_calls(double timeout)
@@ -548,10 +699,16 @@ DLL_PUBLIC bool SATSolver::add_xor_clause(const std::vector<unsigned>& vars, boo
 
 struct OneThreadCalc
 {
-    OneThreadCalc(DataForThread& _data_for_thread, size_t _tid, bool _solve) :
+    OneThreadCalc(
+        DataForThread& _data_for_thread,
+        size_t _tid,
+        bool _solve,
+        bool _only_indep_solution
+    ) :
         data_for_thread(_data_for_thread)
         , tid(_tid)
         , solve(_solve)
+        , only_indep_solution(_only_indep_solution)
     {}
 
     void operator()()
@@ -567,18 +724,18 @@ struct OneThreadCalc
         cls_adder();
         lbool ret;
         if (solve) {
-            ret = data_for_thread.solvers[tid]->solve_with_assumptions(data_for_thread.assumptions);
+            ret = data_for_thread.solvers[tid]->solve_with_assumptions(data_for_thread.assumptions, only_indep_solution);
         } else {
             ret = data_for_thread.solvers[tid]->simplify_with_assumptions(data_for_thread.assumptions);
         }
 
+        data_for_thread.cpu_times[tid] = cpuTime();
         if (print_thread_start_and_finish) {
-            double end_time = cpuTime();
             data_for_thread.update_mutex->lock();
             ios::fmtflags f(cout.flags());
             cout << "c Finished thread " << tid << " with result: " << ret
             << " T-diff: " << std::fixed << std::setprecision(2)
-            << (end_time-start_time)
+            << (data_for_thread.cpu_times[tid]-start_time)
             << endl;
             cout.flags(f);
             data_for_thread.update_mutex->unlock();
@@ -599,10 +756,14 @@ struct OneThreadCalc
     const size_t tid;
     double start_time;
     bool solve;
+    bool only_indep_solution;
 };
 
-lbool calc(const vector< Lit >* assumptions, bool solve, CMSatPrivateData *data)
-{
+lbool calc(
+    const vector< Lit >* assumptions,
+    bool solve, CMSatPrivateData *data,
+    bool only_indep_solution = false
+) {
     //Reset the interrupt signal if it was set
     data->must_interrupt->store(false, std::memory_order_relaxed);
 
@@ -637,11 +798,12 @@ lbool calc(const vector< Lit >* assumptions, bool solve, CMSatPrivateData *data)
 
         lbool ret ;
         if (solve) {
-            ret = data->solvers[0]->solve_with_assumptions(assumptions);
+            ret = data->solvers[0]->solve_with_assumptions(assumptions, only_indep_solution);
         } else {
             ret = data->solvers[0]->simplify_with_assumptions(assumptions);
         }
         data->okay = data->solvers[0]->okay();
+        data->cpu_times[0] = cpuTime();
         return ret;
     }
 
@@ -652,7 +814,7 @@ lbool calc(const vector< Lit >* assumptions, bool solve, CMSatPrivateData *data)
         ; i < data->solvers.size()
         ; i++
     ) {
-        thds.push_back(thread(OneThreadCalc(data_for_thread, i, solve)));
+        thds.push_back(thread(OneThreadCalc(data_for_thread, i, solve, only_indep_solution)));
     }
     for(std::thread& thread : thds){
         thread.join();
@@ -669,14 +831,14 @@ lbool calc(const vector< Lit >* assumptions, bool solve, CMSatPrivateData *data)
     return real_ret;
 }
 
-DLL_PUBLIC lbool SATSolver::solve(const vector< Lit >* assumptions)
+DLL_PUBLIC lbool SATSolver::solve(const vector< Lit >* assumptions, bool only_indep_solution)
 {
     //set information data (props, confl, dec)
     data->previous_sum_conflicts = get_sum_conflicts();
     data->previous_sum_propagations = get_sum_propagations();
     data->previous_sum_decisions = get_sum_decisions();
 
-    return calc(assumptions, true, data);
+    return calc(assumptions, true, data, only_indep_solution);
 }
 
 DLL_PUBLIC lbool SATSolver::simplify(const vector< Lit >* assumptions)
@@ -748,15 +910,52 @@ DLL_PUBLIC const char* SATSolver::get_compilation_env()
     return Solver::get_compilation_env();
 }
 
+std::string SATSolver::get_text_version_info()
+{
+    std::stringstream ss;
+    ss << "c CryptoMiniSat version " << get_version() << endl;
+    ss << "c CMS Copyright Mate Soos (soos.mate@gmail.com)" << endl;
+    ss << "c CMS SHA revision " << get_version_sha1() << endl;
+    #ifdef USE_M4RI
+    ss << "c CMS is GPL licensed due to M4RI being linked. Build without M4RI to get MIT version" << endl;
+    #else
+    ss << "c CMS is MIT licensed" << endl;
+    #endif
+
+    #ifdef USE_GAUSS
+    ss << "c Using code from 'When Boolean Satisfiability Meets Gauss-E. in a Simplex Way'" << endl;
+    ss << "c       by C.-S. Han and J.-H. Roland Jiang in CAV 2012. Fixes by M. Soos" << endl;
+    #endif
+    ss << "c CMS compilation env " << get_compilation_env() << endl;
+    #ifdef __GNUC__
+    ss << "c CMS compiled with gcc version " << __VERSION__ << endl;
+    #else
+    ss << "c CMS compiled with non-gcc compiler" << endl;
+    #endif
+
+    return ss.str();
+}
+
 DLL_PUBLIC void SATSolver::print_stats() const
 {
+    double cpu_time_total = cpuTimeTotal();
+
     double cpu_time;
-    if (data->solvers.size() > 1) {
-        cpu_time = cpuTimeTotal();
+    if (data->interrupted) {
+        //cannot know, we have in fact no idea how much time passed...
+        //we have to guess. Shitty guess comes here... :S
+        cpu_time = cpuTimeTotal()/(double)data->solvers.size();
     } else {
-        cpu_time = cpuTime();
+        cpu_time = data->cpu_times[data->which_solved];
     }
-    data->solvers[data->which_solved]->print_stats(cpu_time);
+
+    //If only one thread, then don't confuse the user. The difference
+    //is minimal.
+    if (data->solvers.size() == 1) {
+        cpu_time = cpu_time_total;
+    }
+
+    data->solvers[data->which_solved]->print_stats(cpu_time, cpu_time_total);
 }
 
 DLL_PUBLIC void SATSolver::set_drat(std::ostream* os, bool add_ID)
@@ -783,19 +982,10 @@ DLL_PUBLIC void SATSolver::interrupt_asap()
     data->must_interrupt->store(true, std::memory_order_relaxed);
 }
 
-DLL_PUBLIC void SATSolver::open_file_and_dump_irred_clauses(std::string fname) const
-{
-    data->solvers[data->which_solved]->open_file_and_dump_irred_clauses(fname);
-}
-
-void DLL_PUBLIC SATSolver::open_file_and_dump_red_clauses(std::string fname) const
-{
-    data->solvers[data->which_solved]->open_file_and_dump_red_clauses(fname);
-}
-
 void DLL_PUBLIC SATSolver::add_in_partial_solving_stats()
 {
     data->solvers[data->which_solved]->add_in_partial_solving_stats();
+    data->interrupted = true;
 }
 
 DLL_PUBLIC std::vector<Lit> SATSolver::get_zero_assigned_lits() const
@@ -837,6 +1027,22 @@ DLL_PUBLIC void SATSolver::log_to_file(std::string filename)
 DLL_PUBLIC std::vector<std::pair<Lit, Lit> > SATSolver::get_all_binary_xors() const
 {
     return data->solvers[0]->get_all_binary_xors();
+}
+
+DLL_PUBLIC vector<std::pair<vector<uint32_t>, bool> >
+SATSolver::get_recovered_xors(bool elongate) const
+{
+    vector<std::pair<vector<uint32_t>, bool> > ret;
+    Solver& s = *data->solvers[0];
+
+    std::pair<vector<uint32_t>, bool> tmp;
+    vector<Xor> xors = s.get_recovered_xors(elongate);
+    for(const auto& x: xors) {
+        tmp.first = x.get_vars();
+        tmp.second = x.rhs;
+        ret.push_back(tmp);
+    }
+    return ret;
 }
 
 DLL_PUBLIC void SATSolver::set_sqlite(std::string filename)
@@ -896,15 +1102,84 @@ DLL_PUBLIC uint64_t SATSolver::get_last_decisions()
     return get_sum_decisions() - data->previous_sum_decisions;
 }
 
-DLL_PUBLIC void SATSolver::set_gauss_config(const GaussConf& gconf)
+DLL_PUBLIC void SATSolver::dump_irred_clauses(std::ostream *out) const
 {
-#ifndef USE_GAUSS
-    std::cerr << "ERROR: Gauss not compiled, cannot set gauss config." << endl;
-    assert(false);
-    exit(-1);
-#endif
+    data->solvers[data->which_solved]->dump_irred_clauses(out);
+}
+
+void DLL_PUBLIC SATSolver::dump_red_clauses(std::ostream *out) const
+{
+    data->solvers[data->which_solved]->dump_red_clauses(out);
+}
+
+DLL_PUBLIC void SATSolver::open_file_and_dump_irred_clauses(std::string fname) const
+{
+    data->solvers[data->which_solved]->open_file_and_dump_irred_clauses(fname);
+}
+
+void DLL_PUBLIC SATSolver::open_file_and_dump_red_clauses(std::string fname) const
+{
+    data->solvers[data->which_solved]->open_file_and_dump_red_clauses(fname);
+}
+
+void DLL_PUBLIC SATSolver::start_getting_small_clauses(uint32_t max_len, uint32_t max_glue)
+{
+    assert(data->solvers.size() >= 1);
+    data->solvers[0]->start_getting_small_clauses(max_len, max_glue);
+}
+
+bool DLL_PUBLIC SATSolver::get_next_small_clause(std::vector<Lit>& out)
+{
+    assert(data->solvers.size() >= 1);
+    return data->solvers[0]->get_next_small_clause(out);
+}
+
+void DLL_PUBLIC SATSolver::end_getting_small_clauses()
+{
+    assert(data->solvers.size() >= 1);
+    data->solvers[0]->end_getting_small_clauses();
+}
+
+void DLL_PUBLIC SATSolver::set_up_for_scalmc()
+{
+    for (size_t i = 0; i < data->solvers.size(); i++) {
+        SolverConf conf = data->solvers[i]->getConf();
+        conf.gaussconf.max_num_matrixes = 2;
+        conf.gaussconf.autodisable = false;
+        conf.global_multiplier_multiplier_max = 3;
+        conf.global_timeout_multiplier_multiplier = 1.5;
+        uint32_t xor_cut = 4;
+        assert(xor_cut >= 3);
+        conf.xor_var_per_cut = xor_cut-2;
+
+        conf.simplify_at_startup = 1;
+        conf.varElimRatioPerIter = 1;
+        conf.restartType = Restart::geom;
+        conf.polarity_mode = CMSat::PolarityMode::polarmode_neg;
+        conf.maple = 0;
+        conf.do_simplify_problem = true;
+        data->solvers[i]->setConf(conf);
+    }
+}
+
+DLL_PUBLIC const std::vector<Lit>& SATSolver::get_decisions_reaching_model() const
+{
+    if (!get_decision_reaching_valid()) {
+        cout << "ERROR: you called get_decisions_reaching_model() but it's not a valid decision set!" << endl;
+        exit(-1);
+    }
+    return data->solvers[data->which_solved]->get_decisions_reaching_model();
+}
+
+DLL_PUBLIC void SATSolver::set_need_decisions_reaching()
+{
     for (size_t i = 0; i < data->solvers.size(); ++i) {
         Solver& s = *data->solvers[i];
-        s.conf.gaussconf = gconf;
+        s.conf.need_decisions_reaching = true;
     }
+}
+
+DLL_PUBLIC bool SATSolver::get_decision_reaching_valid() const
+{
+    return data->solvers[data->which_solved]->get_decision_reaching_valid();
 }

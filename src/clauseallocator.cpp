@@ -35,7 +35,7 @@ THE SOFTWARE.
 #include "time_mem.h"
 #include "sqlstats.h"
 #ifdef USE_GAUSS
-#include "gaussian.h"
+#include "EGaussian.h"
 #endif
 
 #ifdef USE_VALGRIND
@@ -285,19 +285,18 @@ void ClauseAllocator::consolidate(
     }
 
     #ifdef USE_GAUSS
-    for (Gaussian* gauss : solver->gauss_matrixes) {
-        for(GaussClauseToClear& gcl: gauss->clauses_toclear) {
-            ClOffset& off = gcl.offs;
-            Clause* old = ptr(off);
+    for (EGaussian* gauss : solver->gmatrixes) {
+        for(auto& gcl: gauss->clauses_toclear) {
+            Clause* old = ptr(gcl.first);
             if (old->reloced) {
                 ClOffset new_offset = (*old)[0].toInt();
                 #ifdef LARGE_OFFSETS
                 new_offset += ((uint64_t)(*old)[1].toInt())<<32;
                 #endif
-                off = new_offset;
+                gcl.first = new_offset;
             } else {
                 ClOffset new_offset = move_cl(newDataStart, new_ptr, old);
-                off = new_offset;
+                gcl.first = new_offset;
             }
             assert(!old->freed());
         }
@@ -341,10 +340,10 @@ void ClauseAllocator::consolidate(
 
     const double time_used = cpuTime() - myTime;
     if (solver->conf.verbosity >= 2) {
-        cout << "c [mem] Consolidated memory ";
-        cout << " old size "; print_value_kilo_mega(old_size*sizeof(BASE_DATA_TYPE));
-        cout << "B new size"; print_value_kilo_mega(size*sizeof(BASE_DATA_TYPE));
-        cout << "B bits of offset:" << std::fixed << std::setprecision(2) << std::log2(size);
+        cout << "c [mem] consolidate ";
+        cout << " old-sz: "; print_value_kilo_mega(old_size*sizeof(BASE_DATA_TYPE));
+        cout << " new-sz: "; print_value_kilo_mega(size*sizeof(BASE_DATA_TYPE));
+        cout << " new bits offs: " << std::fixed << std::setprecision(2) << std::log2(size);
         cout << solver->conf.print_times(time_used)
         << endl;
     }

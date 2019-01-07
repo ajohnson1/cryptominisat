@@ -77,7 +77,6 @@ void ClauseCleaner::clean_implicit_watchlist(
             *j++ = *i;
             continue;
         }
-        assert(!solver->drat->something_delayed());
 
         if (i->isBin()) {
             clean_binary_implicit(*i, j, lit);
@@ -89,7 +88,10 @@ void ClauseCleaner::clean_implicit_watchlist(
 
 void ClauseCleaner::clean_implicit_clauses()
 {
-    assert(!solver->drat->something_delayed());
+    if (solver->conf.verbosity > 15) {
+        cout << "c cleaning implicit clauses" << endl;
+    }
+
     assert(solver->decisionLevel() == 0);
     impl_data = ImplicitData();
     size_t wsLit = 0;
@@ -118,22 +120,14 @@ void ClauseCleaner::clean_implicit_clauses()
     #endif
 }
 
-void ClauseCleaner::clean_clauses(vector<ClOffset>& cs)
-{
-    clean_clauses_pre();
-    clean_clauses_inter(cs);
-    clean_clauses_post();
-}
-
 void ClauseCleaner::clean_clauses_inter(vector<ClOffset>& cs)
 {
-    assert(!solver->drat->something_delayed());
     assert(solver->decisionLevel() == 0);
     assert(solver->prop_at_head());
 
-    #ifdef VERBOSE_DEBUG
-    cout << "Cleaning  clauses" << endl;
-    #endif //VERBOSE_DEBUG
+    if (solver->conf.verbosity > 15) {
+        cout << "Cleaning clauses in vector<>" << endl;
+    }
 
     vector<ClOffset>::iterator s, ss, end;
     size_t at = 0;
@@ -170,7 +164,6 @@ void ClauseCleaner::clean_clauses_inter(vector<ClOffset>& cs)
 
 inline bool ClauseCleaner::clean_clause(Clause& cl)
 {
-    assert(!solver->drat->something_delayed());
     assert(cl.size() > 2);
     (*solver->drat) << deldelay << cl << fin;
 
@@ -198,7 +191,11 @@ inline bool ClauseCleaner::clean_clause(Clause& cl)
     }
     if (i != j) {
         cl.shrink(i-j);
-        (*solver->drat) << cl << fin << findelay;
+        (*solver->drat) << add << cl
+        #ifdef STATS_NEEDED
+        << solver->sumConflicts
+        #endif
+        << fin << findelay;
     } else {
         solver->drat->forget_delay();
     }
@@ -272,6 +269,8 @@ void ClauseCleaner::clean_clauses_post()
 void ClauseCleaner::remove_and_clean_all()
 {
     double myTime = cpuTime();
+    assert(solver->okay());
+    assert(solver->prop_at_head());
 
     clean_implicit_clauses();
 
@@ -294,6 +293,12 @@ void ClauseCleaner::remove_and_clean_all()
     ) {
         const Lit lit = Lit::toLit(wsLit);
         if (solver->value(lit) != l_Undef) {
+            if (!it->empty()) {
+                cout << "ERROR watches size: " << it->size() << endl;
+                for(const auto& w: *it) {
+                    cout << "ERROR w: " << w << endl;
+                }
+            }
             assert(it->empty());
         }
     }
@@ -354,25 +359,29 @@ bool ClauseCleaner::clean_xor_clauses(vector<Xor>& xors)
     }
     #endif
 
-    size_t i = 0;
-    size_t j = 0;
-    for(size_t size = xors.size(); i < size; i++) {
-        Xor& x = xors[i];
-        const bool keep = clean_one_xor(x);
-        if (!solver->ok) {
-            return false;
-        }
+    size_t last_trail = std::numeric_limits<size_t>::max();
+    while(last_trail != solver->trail_size()) {
+        last_trail = solver->trail_size();
+        size_t i = 0;
+        size_t j = 0;
+        for(size_t size = xors.size(); i < size; i++) {
+            Xor& x = xors[i];
+            const bool keep = clean_one_xor(x);
+            if (!solver->ok) {
+                return false;
+            }
 
-        if (keep) {
-            xors[j++] = x;
+            if (keep) {
+                xors[j++] = x;
+            }
         }
-    }
-    xors.resize(j);
+        xors.resize(j);
 
-    #ifdef VERBOSE_DEBUG
-    for(Xor& x : xors) {
-        cout << "cleaned XOR: " << x << endl;
+        #ifdef VERBOSE_DEBUG
+        for(Xor& x : xors) {
+            cout << "cleaned XOR: " << x << endl;
+        }
+        #endif
     }
-    #endif
-    return solver->ok;
+    return solver->okay();
 }

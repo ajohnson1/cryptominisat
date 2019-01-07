@@ -107,7 +107,7 @@ void SolveFeaturesCalc::for_all_clauses(Function func_each_cl, Function2 func_ea
 
 void SolveFeaturesCalc::fill_vars_cls()
 {
-    feat.numVars = solver->nVars();
+    feat.numVars = solver->get_num_free_vars();
     feat.numClauses = solver->longIrredCls.size() + solver->binTri.irredBins;
     myVars.resize(solver->nVars());
 
@@ -375,8 +375,12 @@ SolveFeatures SolveFeaturesCalc::extract()
         calculate_extra_clause_stats();
         calculate_extra_var_stats();
 
-        calculate_cl_distributions(solver->longRedCls[0], feat.red_cl_distrib);
-        calculate_cl_distributions(solver->longIrredCls, feat.irred_cl_distrib);
+        if (!solver->longRedCls[0].empty()) {
+            calculate_cl_distributions(solver->longRedCls[0], feat.red_cl_distrib);
+        }
+        if (!solver->longIrredCls.empty()) {
+            calculate_cl_distributions(solver->longIrredCls, feat.irred_cl_distrib);
+        }
     }
     normalise_values();
 

@@ -65,7 +65,7 @@ The return value is a tuple. First part of the tuple indicates whether the
 problem is satisfiable. In this case, it's ``True``, i.e. satisfiable. The second
 part is a tuple contains the solution, preceded by None, so you can index into
 it with the variable number. E.g. ``solution[1]`` returns the value for
-variabe ``1``.
+variable ``1``.
 
 The ``solve()`` method optionally takes an argument ``assumptions`` that
 allows the user to set values to specific variables in the solver in a temporary
@@ -76,11 +76,11 @@ If instead of an assumption ``add_clause()`` would have been used, subsequent
 ``solve()`` calls would have returned unsatisfiable.
 
 ``Solver`` takes the following keyword arguments:
+  * ``time_limit``: the time limit (integer)
   * ``confl_limit``: the propagation limit (integer)
   * ``verbose``: the verbosity level (integer)
 
-The ``confl_limit`` argument sets a kind of time-out limit to the solver. If
-the solver runs out of time, it returns with ``(None, None)``.
+Both ``time_limit`` and ``confl_limit`` set a budget to the solver. The former is based on time elapsed while the former is based on number of conflicts met during search. If the solver runs out of budget, it returns with ``(None, None)``. If both limits are used, the solver will terminate whenever one of the limits are hit (whichever first). Warning: Results from ``time_limit`` may differ from run to run, depending on compute load, etc. Use ``confl_limit`` for more reproducible runs.
 
 Example
 -------

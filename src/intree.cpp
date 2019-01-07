@@ -28,6 +28,7 @@ THE SOFTWARE.
 #include "watchalgos.h"
 
 #include <cmath>
+#include <cassert>
 
 using namespace CMSat;
 
@@ -48,18 +49,23 @@ bool InTree::replace_until_fixedpoint(bool& aborted)
     uint64_t bogoprops = 0;
     uint32_t last_replace = std::numeric_limits<uint32_t>::max();
     uint32_t this_replace = solver->varReplacer->get_num_replaced_vars();
-    while(last_replace != this_replace) {
+    while(last_replace != this_replace && !aborted) {
         last_replace = this_replace;
         solver->clauseCleaner->remove_and_clean_all();
         bool OK = solver->varReplacer->replace_if_enough_is_found(0, &bogoprops);
         if (!OK) {
             return false;
         }
+
+        if (solver->varReplacer->get_scc_depth_warning_triggered()) {
+            aborted = true;
+            return solver->okay();
+        }
         this_replace = solver->varReplacer->get_num_replaced_vars();
 
         if (bogoprops > time_limit) {
             aborted = true;
-            return true;
+            return solver->okay();
         }
     }
 
@@ -81,13 +87,14 @@ bool InTree::watches_only_contains_nonbin(const Lit lit) const
 bool InTree::check_timeout_due_to_hyperbin()
 {
     assert(!(solver->timedOutPropagateFull && solver->drat->enabled()));
+    assert(!(solver->timedOutPropagateFull && solver->conf.simulate_drat));
 
     if (solver->timedOutPropagateFull
         && !solver->drat->enabled()
     ) {
         if (solver->conf.verbosity) {
             cout
-            << "c [intree] intra-propagation timout,"
+            << "c [intree] intra-propagation timeout,"
             << " turning off OTF hyper-bin&trans-red"
             << endl;
         }
@@ -134,12 +141,12 @@ bool InTree::intree_probe()
     bool aborted = false;
     if (!replace_until_fixedpoint(aborted))
     {
-        return false;
+        return solver->okay();
     }
     if (aborted) {
         if (solver->conf.verbosity) {
             cout
-            << "c [intree] too expensive SCC + varreplace loop: aborting"
+            << "c [intree] too expensive or depth exceeded during SCC: aborting"
             << endl;
         }
         solver->use_depth_trick = true;
@@ -329,7 +336,9 @@ bool InTree::handle_lit_popped_from_queue(const Lit lit, const Lit other_lit, co
         bool ok;
         if (solver->conf.otfHyperbin) {
             uint64_t max_hyper_time = std::numeric_limits<uint64_t>::max();
-            if (!solver->drat->enabled()) {
+            if (!solver->drat->enabled() &&
+                !solver->conf.simulate_drat
+            ) {
                 max_hyper_time =
                 solver->propStats.otfHyperTime
                 + solver->propStats.bogoProps
@@ -374,14 +383,30 @@ bool InTree::empty_failed_list()
 
         if (solver->value(lit) == l_Undef) {
             solver->enqueue(lit);
-            *(solver->drat) << lit << fin;
+            *(solver->drat) << add << lit
+            #ifdef STATS_NEEDED
+            << solver->clauseID++
+            << solver->sumConflicts
+            #endif
+            << fin;
             solver->ok = solver->propagate<true>().isNULL();
             if (!solver->ok) {
                 return false;
             }
         } else if (solver->value(lit) == l_False) {
-            *(solver->drat) << ~lit << fin;
-            *(solver->drat) << fin;
+            *(solver->drat) << add << ~lit
+            #ifdef STATS_NEEDED
+            << solver->clauseID++
+            << solver->sumConflicts
+            #endif
+            << fin;
+
+            *(solver->drat) << add
+            #ifdef STATS_NEEDED
+            << solver->clauseID++
+            << solver->sumConflicts
+            #endif
+            << fin;
             solver->ok = false;
             return false;
         }

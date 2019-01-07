@@ -131,7 +131,8 @@ struct ClauseStats
     float   activity = 1.0;
     uint32_t last_touched = 0;
     #ifdef STATS_NEEDED
-    int64_t ID = 1;
+    uint32_t dump_number = std::numeric_limits<uint32_t>::max();
+    int64_t ID = 0;
     uint64_t introduced_at_conflict = 0; ///<At what conflict number the clause  was introduced
     uint64_t conflicts_made = 0; ///<Number of times caused conflict
     uint64_t sum_of_branch_depth_conflict = 0;
@@ -141,10 +142,23 @@ struct ClauseStats
     AtecedentData<uint16_t> antec_data;
     #endif
 
+    #ifdef STATS_NEEDED
+    void reset_rdb_stats()
+    {
+        ttl = 0;
+        conflicts_made = 0;
+        sum_of_branch_depth_conflict = 0;
+        propagations_made = 0;
+        clause_looked_at = 0;
+        used_for_uip_creation = 0;
+        antec_data.clear();
+    }
+    #endif
+
     static ClauseStats combineStats(const ClauseStats& first, const ClauseStats& second)
     {
         //Create to-be-returned data
-        ClauseStats ret;
+        ClauseStats ret = first;
 
         //Combine stats
         ret.glue = std::min(first.glue, second.glue);
@@ -190,7 +204,7 @@ class Clause
 {
 public:
     uint16_t isRed:1; ///<Is the clause a redundant clause?
-    uint16_t isRemoved:1; ///<Is this clause queued for removal because of usless binary removal?
+    uint16_t isRemoved:1; ///<Is this clause queued for removal?
     uint16_t isFreed:1; ///<Has this clause been marked as freed by the ClauseAllocator ?
     uint16_t is_distilled:1;
     uint16_t occurLinked:1;
@@ -331,6 +345,9 @@ public:
     void makeIrred()
     {
         assert(isRed);
+        #if STATS_NEEDED
+        stats.ID = 0;
+        #endif
         isRed = false;
     }
 

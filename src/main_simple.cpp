@@ -52,6 +52,7 @@ SATSolver* solver;
 bool zero_exit_status = false;
 static void SIGINT_handler(int) {
     cout << "\n*** INTERRUPTED ***\n";
+    solver->add_in_partial_solving_stats();
     solver->print_stats();
     cout << "\n*** INTERRUPTED ***\n";
     exit(1);
@@ -61,9 +62,9 @@ void printVersionInfo()
 {
     cout << "c CryptoMiniSat version " << solver->get_version() << endl;
     #ifdef __GNUC__
-    cout << "c compiled with gcc version " << __VERSION__ << endl;
+    cout << "c CryptoMiniSat compiled with gcc version " << __VERSION__ << endl;
     #else
-    cout << "c compiled with non-gcc compiler" << endl;
+    cout << "c CryptoMiniSat compiled with non-gcc compiler" << endl;
     #endif
 }
 
@@ -71,7 +72,7 @@ void printVersionInfo()
 void handle_drat_option(SolverConf& conf, const char* dratfilname)
 {
     std::ofstream* dratfTmp = new std::ofstream;
-    dratfTmp->open(dratfilname, std::ofstream::out);
+    dratfTmp->open(dratfilname, std::ofstream::out | std::ofstream::binary);
     if (!*dratfTmp) {
         std::cerr
         << "ERROR: Could not open DRAT file "
@@ -125,11 +126,11 @@ void printUsage(char** argv)
     cout << "USAGE:"
     << argv[0] << " [options] <input-file> \n\n  where input is plain DIMACS.\n\n";
     cout << "OPTIONS:\n\n";
-    cout << "  --verb          = [0...] Sets verbosity level. Anything higher\n";
-    cout << "                           than 2 will give debug log\n";
-    cout << "  --drat          = {0,1}  Sets whether DRAT should be dumped to\n";
-    cout << "                           the console as per SAT COMPETITION'14 guidelines\n";
-    cout << "  --threads       = [1...] Sets number of threads\n";
+    cout << "  --verb          = [0...]  Sets verbosity level. Anything higher\n";
+    cout << "                            than 2 will give debug log\n";
+    cout << "  --drat          = {fname} DRAT dumped to file\n";
+    cout << "  --gluebreak     = {0,1}   Break the glue-based restarts\n";
+    cout << "  --threads       = [1...]  Sets number of threads\n";
     cout << "\n";
 }
 
@@ -145,7 +146,7 @@ const char* hasPrefix(const char* str, const char* prefix)
 int main(int argc, char** argv)
 {
     SolverConf conf;
-    conf.verbosity = 2;
+    conf.verbosity = 1;
     dratf = NULL;
 
     int i, j;
@@ -167,6 +168,28 @@ int main(int argc, char** argv)
                 cout << "ERROR! illegal threads " << value << endl;
                 exit(0);
             }
+            if (num_threads > 16) {
+                conf.var_and_mem_out_mult *= 0.4;
+            }
+        }else if ((value = hasPrefix(argv[i], "--otherconf="))){
+            int otherconf  = (int)strtol(value, NULL, 10);
+            if (otherconf == 0 && errno == EINVAL){
+                cout << "ERROR! illegal threads " << value << endl;
+                exit(0);
+            }
+            if (otherconf == 1) {
+                cout << "c other conf set" << endl;
+                conf.intree_time_limitM = 1500;
+                conf.min_bva_gain = 64;
+                conf.ratio_glue_geom = 5;
+            }
+        }else if ((value = hasPrefix(argv[i], "--gluebreak="))){
+            int gluebreak  = (int)strtol(value, NULL, 10);
+            if (gluebreak == 0 && errno == EINVAL){
+                cout << "ERROR! illegal gluebreak " << value << endl;
+                exit(0);
+            }
+            conf.broken_glue_restart = gluebreak;
         }else if ((value = hasPrefix(argv[i], "--reconf="))){
             long int reconf  = (int)strtol(value, NULL, 10);
             if (reconf == 0 && errno == EINVAL){
@@ -240,11 +263,7 @@ int main(int argc, char** argv)
 
         if (in == NULL) {
             std::cout << "ERROR! Could not open file: ";
-            if (argc == 1) {
-                std::cout << "<stdin>";
-            } else {
-                std::cout << argv[1] << " reason: " << strerror(errno);
-            }
+            std::cout << argv[1] << " reason: " << strerror(errno);
             std::cout << std::endl;
             std::exit(1);
         }
@@ -276,7 +295,13 @@ int main(int argc, char** argv)
     if (conf.verbosity) {
         S.print_stats();
     }
-    cout << (ret == l_True ? "s SATISFIABLE" : "s UNSATISFIABLE") << endl;
+
+    if (ret == l_True) {
+        cout << "s SATISFIABLE" << endl;
+    } else if (ret == l_False) {
+        cout << "s UNSATISFIABLE"<< endl;
+    }
+
     if (ret == l_True) {
         print_model(&std::cout, solver);
     }

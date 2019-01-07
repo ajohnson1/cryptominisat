@@ -133,6 +133,7 @@ vector<pair<uint32_t, uint32_t> > CompHandler::get_component_sizes() const
 
 bool CompHandler::handle()
 {
+    assert(solver->conf.independent_vars == NULL && "Cannot handle components when indep vars is set");
     assert(solver->okay());
     double myTime = cpuTime();
 
@@ -157,11 +158,13 @@ bool CompHandler::handle()
 
         delete compFinder;
         compFinder = NULL;
-        return solver->ok;
+        return solver->okay();
     }
 
-    solver->clear_gauss();
     solver->xorclauses.clear();
+    #ifdef USE_GAUSS
+    solver->clearEnGaussMatrixes();
+    #endif
     map<uint32_t, vector<uint32_t> > reverseTable = compFinder->getReverseTable();
     assert(num_comps == compFinder->getReverseTable().size());
     vector<pair<uint32_t, uint32_t> > sizes = get_component_sizes();
@@ -183,7 +186,7 @@ bool CompHandler::handle()
         delete compFinder;
         compFinder = NULL;
 
-        return solver->ok;
+        return solver->okay();
     }
 
     const double time_used = cpuTime() - myTime;
@@ -208,7 +211,7 @@ bool CompHandler::handle()
 
     delete compFinder;
     compFinder = NULL;
-    return solver->ok;
+    return solver->okay();
 }
 
 bool CompHandler::try_to_solve_component(
@@ -221,7 +224,9 @@ bool CompHandler::try_to_solve_component(
         assert(solver->value(var) == l_Undef);
     }
 
-    if (vars_orig.size() > 100ULL*1000ULL) {
+    if (vars_orig.size() > 100ULL*1000ULL*
+            solver->conf.var_and_mem_out_mult
+       ) {
         //There too many variables -- don't create a sub-solver
         //I'm afraid that we will memory-out
 
@@ -390,6 +395,7 @@ SolverConf CompHandler::configureNewSolver(
 ) const {
     SolverConf conf(solver->conf);
     conf.origSeed = solver->mtrand.randInt();
+    conf.independent_vars = NULL;
     if (numVars < 60) {
         conf.do_simplify_problem = false;
         conf.doStamp = false;
@@ -634,7 +640,7 @@ void CompHandler::moveClausesImplicit(
     solver->binTri.redBins -= numRemovedHalfRed/2;
 }
 
-void CompHandler::addSavedState(vector<lbool>& solution)
+void CompHandler::addSavedState(vector<lbool>& solution, vector<Lit>& decisions)
 {
     //Enqueue them. They may need to be extended, so enqueue is needed
     //manipulating "model" may not be good enough
@@ -648,6 +654,7 @@ void CompHandler::addSavedState(vector<lbool>& solution)
             const lbool val = savedState[var];
             assert(solution[var] == l_Undef);
             solution[var] = val;
+            decisions.push_back(Lit(var, val == l_False));
             //cout << "Solution to var " << var + 1 << " has been added: " << val << endl;
 
             solver->varData[interVar].polarity = (val == l_True);
@@ -744,8 +751,12 @@ void CompHandler::readdRemovedClauses()
     removedClauses.sizes.clear();
 }
 
-void CompHandler::dump_removed_clauses(std::ostream* outfile) const
+uint32_t CompHandler::dump_removed_clauses(std::ostream* outfile) const
 {
+    if (outfile == NULL)
+        return removedClauses.sizes.size();
+
+    uint32_t num_cls = 0;
     vector<Lit> tmp;
     size_t at = 0;
     for (uint32_t size :removedClauses.sizes) {
@@ -755,8 +766,10 @@ void CompHandler::dump_removed_clauses(std::ostream* outfile) const
         }
         std::sort(tmp.begin(), tmp.end());
         *outfile << tmp << " 0" << endl;
+        num_cls ++;
 
         //Move 'at' along
         at += size;
     }
+    return num_cls;
 }
