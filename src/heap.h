@@ -87,7 +87,21 @@ class Heap {
 public:
     Heap(const Comp& c) : lt(c) { }
 
-    int  size      ()          const
+    void print_heap() {
+        std::cout << "heap:";
+        for(auto x: heap) {
+            std::cout << x << " ";
+        }
+        std::cout << std::endl;
+
+        std::cout << "ind:";
+        for(auto x: indices) {
+            std::cout << x << " ";
+        }
+        std::cout << std::endl;
+    }
+
+    uint32_t  size      ()          const
     {
         return heap.size();
     }

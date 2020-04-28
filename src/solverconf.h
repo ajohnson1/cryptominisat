@@ -88,7 +88,7 @@ inline std::string getNameOfRestartType(Restart rest_type)
 
         default:
             assert(false && "Unknown clause cleaning type?");
-    };
+    }
 }
 
 inline std::string getNameOfCleanType(ClauseClean clauseCleaningType)
@@ -103,7 +103,7 @@ inline std::string getNameOfCleanType(ClauseClean clauseCleaningType)
         default:
             assert(false && "Unknown clause cleaning type?");
             std::exit(-1);
-    };
+    }
 }
 
 class GaussConf
@@ -153,7 +153,11 @@ class DLL_PUBLIC SolverConf
         double  var_decay_vsids_start;
         double  var_decay_vsids_max;
         double random_var_freq;
+        int alternate_vsids;
+        double alternate_vsids_decay_rate1;
+        double alternate_vsids_decay_rate2;
         PolarityMode polarity_mode;
+        unsigned chronophase;
 
         //Clause cleaning
 
@@ -181,12 +185,13 @@ class DLL_PUBLIC SolverConf
         double   adjust_glue_if_too_many_low;
         uint64_t min_num_confl_adjust_glue_cutoff;
 
-        int      guess_cl_effectiveness;
-
         //maple
         int      maple;
         unsigned modulo_maple_iter;
         bool     more_maple_bump_high_glue;
+        int      alternate_maple;
+        double   alternate_maple_decay_rate1;
+        double   alternate_maple_decay_rate2;
 
         //For restarting
         unsigned    restart_first;      ///<The initial restart limit.                                                                (default 100)
@@ -195,7 +200,6 @@ class DLL_PUBLIC SolverConf
         int       do_blocking_restart;
         unsigned blocking_restart_trail_hist_length;
         double   blocking_restart_multip;
-        int      broken_glue_restart;
 
         double   local_glue_multiplier;
         unsigned  shortTermHistorySize; ///< Rolling avg. glue window size
@@ -233,8 +237,10 @@ class DLL_PUBLIC SolverConf
 
         //OTF stuff
         int       otfHyperbin;
-        int       doOTFSubsume;
-        int       doOTFSubsumeOnlyAtOrBelowGlue;
+
+        //chrono bt
+        int diff_declev_for_chrono;
+
 
         //decision-based conflict clause generation
         int       do_decision_based_cl;
@@ -260,11 +266,19 @@ class DLL_PUBLIC SolverConf
         double    varElimRatioPerIter;
         int      skip_some_bve_resolvents;
         int velim_resolvent_too_large; //-1 == no limit
+        int var_linkin_limit_MB;
 
         //Subs, str limits for simplifier
         long long subsumption_time_limitM;
+        double subsumption_time_limit_ratio_sub_str_w_bin;
+        double subsumption_time_limit_ratio_sub_w_long;
         long long strengthening_time_limitM;
-        long long aggressive_elim_time_limitM;
+
+        //Ternary resolution
+        bool doTernary;
+        long long ternary_res_time_limitM;
+        double ternary_keep_mult;
+        double ternary_max_create;
 
         //BVA
         int      do_bva;
@@ -273,6 +287,7 @@ class DLL_PUBLIC SolverConf
         int      bva_also_twolit_diff;
         long     bva_extra_lit_and_red_start;
         long long bva_time_limitM;
+        uint32_t  bva_every_n;
 
         //Probing
         int      doProbe;
@@ -314,6 +329,7 @@ class DLL_PUBLIC SolverConf
         uint64_t num_conflicts_of_search;
         double   num_conflicts_of_search_inc;
         double   num_conflicts_of_search_inc_max;
+        uint32_t max_num_simplify_per_solve_call;
         string   simplify_schedule_startup;
         string   simplify_schedule_nonstartup;
         string   simplify_schedule_preproc;
@@ -327,16 +343,31 @@ class DLL_PUBLIC SolverConf
         double maxOccurRedLitLinkedM;
         double   subsume_gothrough_multip;
 
+        //Walksat
+        int doSLS;
+        uint32_t sls_every_n;
+        uint32_t yalsat_max_mems;
+        uint32_t sls_memoutMB;
+        uint32_t walksat_max_runs;
+        int      sls_get_phase;
+        string   which_sls;
+        uint32_t sls_how_many_to_bump;
+
         //Distillation
         int      do_distill_clauses;
         unsigned long long distill_long_cls_time_limitM;
         long watch_cache_stamp_based_str_time_limitM;
         long long distill_time_limitM;
+        double distill_increase_conf_ratio;
+        long distill_min_confl;
+        double distill_red_tier1_ratio;
 
         //Memory savings
         int       doRenumberVars;
+        int       must_renumber; ///< if set, all "renumber" is treated as a "must-renumber"
         int       doSaveMem;
         uint64_t  full_watch_consolidate_every_n_confl;
+        int       static_mem_consolidate_order;
 
         //Component handling
         int       doCompHandler;
@@ -362,11 +393,10 @@ class DLL_PUBLIC SolverConf
 
         //Gauss
         GaussConf gaussconf;
-        bool dont_elim_xor_vars;
 
         //Greedy undef
         int      greedy_undef;
-        std::vector<uint32_t>* independent_vars;
+        std::vector<uint32_t>* sampling_vars;
 
         //Timeouts
         double orig_global_timeout_multiplier;

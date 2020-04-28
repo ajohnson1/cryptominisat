@@ -170,7 +170,6 @@ public:
 
     const Stats& get_stats() const;
     size_t mem_used() const;
-    void free_mem();
     void grab_mem();
     void add_xors_to_solver();
     vector<Xor> remove_xors_without_connecting_vars(const vector<Xor>& this_xors);
@@ -241,7 +240,7 @@ template<class T> void PossibleXor::add(
 
     cout << "FoundComb before:" << endl;
     for(size_t i = 0; i < foundComb.size(); i++) {
-        cout << "foundComb[" << i << "]: " << foundComb[i] << endl;
+        cout << "foundComb[" << i << "]: " << (int)foundComb[i] << endl;
     }
     cout << "----" << endl;
     #endif

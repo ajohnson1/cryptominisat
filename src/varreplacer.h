@@ -61,6 +61,7 @@ class VarReplacer
         void extend_model_already_set();
         void extend_model_set_undef();
         void extend_model(const uint32_t var);
+        void extend_pop_queue(vector<Lit>& pop);
 
         uint32_t get_var_replaced_with(const uint32_t var) const;
         uint32_t get_var_replaced_with(const Lit lit) const;
@@ -147,8 +148,8 @@ class VarReplacer
         void attach_delayed_attach();
         void update_all_vardata_activities();
         void update_vardata_and_activities(
-            const uint32_t orig
-            , const uint32_t replaced
+            const Lit orig
+            , const Lit replaced
         );
         bool enqueueDelayedEnqueue();
 
@@ -208,14 +209,6 @@ class VarReplacer
             , const Lit origLit2
             , Lit lit1
             , Lit lit2
-        );
-        void newBinClause(
-            Lit origLit1
-            , Lit origLit2
-            , Lit origLit3
-            , Lit lit1
-            , Lit lit2
-            , bool red
         );
         void updateStatsFromImplStats();
 

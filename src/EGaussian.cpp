@@ -106,6 +106,7 @@ EGaussian::EGaussian(Solver* _solver, const GaussConf& _config, const uint32_t _
 }
 
 EGaussian::~EGaussian() {
+    delete_gauss_watch_this_matrix();
     for (uint32_t i = 0; i < clauses_toclear.size(); i++) {
         solver->cl_alloc.clauseFree(clauses_toclear[i].first);
     }
@@ -113,7 +114,7 @@ EGaussian::~EGaussian() {
 
 void EGaussian::canceling(const uint32_t sublevel) {
     uint32_t a = 0;
-    for (int i = clauses_toclear.size() - 1; i >= 0 && clauses_toclear[i].second > sublevel; i--) {
+    for (int i = (int)clauses_toclear.size() - 1; i >= 0 && clauses_toclear[i].second > sublevel; i--) {
         solver->cl_alloc.clauseFree(clauses_toclear[i].first);
         a++;
     }
@@ -225,14 +226,18 @@ void EGaussian::fill_matrix(matrixset& origMat) {
     GasVar_state.growTo(solver->nVars(), non_basic_var); // init varaible state
     origMat.nb_rows.clear();                             // clear non-basic
 
-    // delete gauss watch list for this matrix
-    for (size_t ii = 0; ii < solver->gwatches.size(); ii++) {
-        clear_gwatches(ii);
-    }
+    delete_gauss_watch_this_matrix();
     clause_state.resize(1, origMat.num_rows);
     PackedMatrix::iterator rowIt = clause_state.beginMatrix();
     (*rowIt).setZero(); // reset this row all zero
     // print_matrix(origMat);
+}
+
+void EGaussian::delete_gauss_watch_this_matrix()
+{
+    for (size_t ii = 0; ii < solver->gwatches.size(); ii++) {
+        clear_gwatches(ii);
+    }
 }
 
 void EGaussian::clear_gwatches(const uint32_t var) {
@@ -468,7 +473,7 @@ inline void EGaussian::propagation_twoclause() {
 
     lit1 = ~lit1;
     lit2 = ~lit2;
-    solver->enqueue(lit1, PropBy(lit2, true));
+    solver->enqueue(lit1, solver->decisionLevel(), PropBy(lit2, true));
 }
 
 inline void EGaussian::conflict_twoclause(PropBy& confl) {
@@ -476,6 +481,14 @@ inline void EGaussian::conflict_twoclause(PropBy& confl) {
     // printf("dd %d:This row is conflict two    n",row_n);
     Lit lit1 = tmp_clause[0];
     Lit lit2 = tmp_clause[1];
+
+#if 0
+    cout << "conflict twoclause: " << lit1 << " " << lit2
+    << " vals: " << solver->value(lit1) << " " << solver->value(lit2)
+    << " levels: " << solver->varData[lit1.var()].level << " " << solver->varData[lit2.var()].level
+    << " declevel: " << solver->decisionLevel()
+    << endl;
+#endif
 
     solver->attach_bin_clause(lit1, lit2, true, false);
     // solver->dataSync->signalNewBinClause(lit1, lit2);
@@ -571,7 +584,7 @@ bool EGaussian::find_truths2(const GaussWatched* i, GaussWatched*& j, uint32_t p
                 solver->gqhead = solver->trail.size();
 
                 // for tell outside solver
-                gqd.ret_gauss = 1; // gaussian matrix is unit_conflict
+                gqd.ret_gauss = 1; // gaussian matrix is binary conflict clause
                 gqd.conflict_size_gauss = 2;
                 solver->sum_Enunit++;
                 return false;
@@ -579,7 +592,7 @@ bool EGaussian::find_truths2(const GaussWatched* i, GaussWatched*& j, uint32_t p
                 // long conflict clause
                 *j++ = *i;
                 gqd.conflict_clause_gauss = tmp_clause; // choose better conflice clause
-                gqd.ret_gauss = 0;                      // gaussian matrix is conflict
+                gqd.ret_gauss = 0;                      // gaussian matrix is long conflict
                 gqd.conflict_size_gauss = tmp_clause.size();
                 gqd.xorEqualFalse_gauss = !matrix.matrix.getMatrixAt(row_n).rhs();
 
@@ -620,7 +633,7 @@ bool EGaussian::find_truths2(const GaussWatched* i, GaussWatched*& j, uint32_t p
                     GasVar_state[p] = basic_var;
                 }
 
-                gqd.ret_gauss = 3;                      // gaussian matrix is unit_propagation
+                gqd.ret_gauss = 3; // gaussian matrix is unit_propagation
                 solver->gqhead = solver->qhead; // quick break gaussian elimination
                 (*clauseIt).setBit(row_n);          // this clause arleady sat
                 return false;
@@ -640,7 +653,7 @@ bool EGaussian::find_truths2(const GaussWatched* i, GaussWatched*& j, uint32_t p
                     clauses_toclear.push_back(std::make_pair(offs, solver->trail.size() - 1));
                     assert(!cla->freed());
                     assert(solver->value((*cla)[0].var()) == l_Undef);
-                    solver->enqueue((*cla)[0], PropBy(offs));
+                    solver->enqueue((*cla)[0], solver->decisionLevel(), PropBy(offs));
                 }
                 gqd.ret_gauss = 2; // gaussian matrix is  propagation
             }
@@ -769,7 +782,7 @@ void EGaussian::eliminate_col2(uint32_t p, GaussQData& gqd) {
                             solver->qhead = solver->trail.size();
                             solver->gqhead = solver->trail.size();
 
-                            // unit_conflict
+                            // gaussian matrix is unit conflict clause
                             gqd.ret_gauss = 1;
                             solver->sum_Enunit++;
 
@@ -830,7 +843,7 @@ void EGaussian::eliminate_col2(uint32_t p, GaussQData& gqd) {
                                 clauses_toclear.push_back(std::make_pair(offs, solver->trail.size() - 1));
                                 assert(!cla->freed());
                                 assert(solver->value((*cla)[0].var()) == l_Undef);
-                                solver->enqueue((*cla)[0], PropBy(offs));
+                                solver->enqueue((*cla)[0], solver->decisionLevel(), PropBy(offs));
                             }
                             gqd.ret_gauss = 2;
                             (*clauseIt).setBit(num_row); // this clause arleady sat

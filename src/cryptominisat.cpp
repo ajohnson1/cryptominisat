@@ -30,6 +30,7 @@ THE SOFTWARE.
 #include <thread>
 #include <mutex>
 #include <atomic>
+#include <cassert>
 using std::thread;
 
 #define CACHE_SIZE 10ULL*1000ULL*1000UL
@@ -188,6 +189,7 @@ void update_config(SolverConf& conf, unsigned thread_num)
             conf.varElimRatioPerIter = 0.4;
             conf.every_lev1_reduce = 0;
             conf.every_lev2_reduce = 0;
+            conf.do_bva = false;
             conf.max_temp_lev2_learnt_clauses = 30000;
             conf.glue_put_lev0_if_below_or_eq = 4;
 
@@ -208,7 +210,7 @@ void update_config(SolverConf& conf, unsigned thread_num)
         }
         case 7: {
             conf.maple = 0;
-            conf.do_bva = true;
+            conf.do_bva = false;
             conf.glue_put_lev0_if_below_or_eq = 2;
             conf.varElimRatioPerIter = 1;
             conf.inc_max_temp_lev2_red_cls = 1.04;
@@ -265,6 +267,7 @@ void update_config(SolverConf& conf, unsigned thread_num)
         case 14: {
             //Different glue limit
             conf.maple = 0;
+            conf.do_bva = false;
             conf.doMinimRedMoreMore = 1;
             conf.glue_put_lev0_if_below_or_eq = 4;
             //conf.glue_put_lev2_if_below_or_eq = 8;
@@ -311,7 +314,8 @@ void update_config(SolverConf& conf, unsigned thread_num)
 
         case 19: {
             conf.maple = 1;
-            conf.doMinimRedMoreMore = 1;
+            conf.do_bva = false;
+            conf.doMinimRedMoreMore = 0;
             conf.orig_global_timeout_multiplier = 5;
             conf.num_conflicts_of_search_inc = 1.15;
             conf.more_red_minim_limit_cache = 1200;
@@ -341,7 +345,7 @@ void update_config(SolverConf& conf, unsigned thread_num)
 
         case 22: {
             conf.maple = 0;
-            conf.doMinimRedMoreMore = 1;
+            conf.doMinimRedMoreMore = 0;
             conf.orig_global_timeout_multiplier = 5;
             conf.num_conflicts_of_search_inc = 1.15;
             conf.more_red_minim_limit_cache = 1200;
@@ -494,29 +498,30 @@ static bool actually_add_clauses_to_threads(CMSatPrivateData* data)
 
 DLL_PUBLIC void SATSolver::set_max_time(double max_time)
 {
-  for (size_t i = 0; i < data->solvers.size(); ++i) {
-    Solver& s = *data->solvers[i];
-    if (max_time >= 0) {
-      s.conf.maxTime = s.get_stats().cpu_time + max_time;
+  assert(max_time >= 0 && "Cannot set negative limit on running time");
 
-      //don't allow for overflow
-      if (s.conf.maxTime < max_time)
-          s.conf.maxTime = max_time;
-    }
+  const auto target_time = cpuTime() + max_time;
+  for (Solver* s : data->solvers) {
+    s->conf.maxTime = target_time;
   }
 }
 
 DLL_PUBLIC void SATSolver::set_max_confl(int64_t max_confl)
 {
-  for (size_t i = 0; i < data->solvers.size(); ++i) {
-    Solver& s = *data->solvers[i];
-    if (max_confl >= 0) {
-      s.conf.max_confl = s.get_stats().conflStats.numConflicts + max_confl;
+  assert(max_confl >= 0 && "Cannot set negative limit on conflicts");
 
-      //don't allow for overflow
-      if (s.conf.max_confl < max_confl)
-          s.conf.max_confl = max_confl;
-    }
+  for (Solver* s : data->solvers) {
+    uint64_t new_max = s->get_stats().conflStats.numConflicts + static_cast<uint64_t>(max_confl);
+    bool would_overflow = std::numeric_limits<long>::max() < new_max
+                       || new_max < s->get_stats().conflStats.numConflicts;
+
+    // TBD: It is highly unlikely that an int64_t could overflow in practice,
+    // meaning that this test is unlikely to ever fire. However, the conflict
+    // limit inside the solver is stored as a long, which can be 32 bits
+    // on some platforms. In practice that is also unlikely to be overflown,
+    // but it needs some extra checks.
+    s->conf.max_confl = would_overflow? std::numeric_limits<long>::max()
+                                      : static_cast<long>(new_max);
   }
 }
 
@@ -602,11 +607,11 @@ DLL_PUBLIC void SATSolver::set_greedy_undef()
     }
 }
 
-DLL_PUBLIC void SATSolver::set_independent_vars(vector<uint32_t>* ind_vars)
+DLL_PUBLIC void SATSolver::set_sampling_vars(vector<uint32_t>* sampl_vars)
 {
     for (size_t i = 0; i < data->solvers.size(); ++i) {
         Solver& s = *data->solvers[i];
-        s.conf.independent_vars = ind_vars;
+        s.conf.sampling_vars = sampl_vars;
     }
 }
 
@@ -656,7 +661,7 @@ void add_xor_clause_to_log(const std::vector<unsigned>& vars, bool rhs, std::ofs
 {
     if (vars.size() == 0) {
         if (rhs) {
-            (*file) << "0" << endl;;
+            (*file) << "0" << endl;
         }
     } else {
         if (!rhs) {
@@ -665,7 +670,7 @@ void add_xor_clause_to_log(const std::vector<unsigned>& vars, bool rhs, std::ofs
         for(unsigned var: vars) {
             (*file) << (var+1) << " ";
         }
-        (*file) << " 0" << endl;;
+        (*file) << " 0" << endl;
     }
 }
 
@@ -703,12 +708,12 @@ struct OneThreadCalc
         DataForThread& _data_for_thread,
         size_t _tid,
         bool _solve,
-        bool _only_indep_solution
+        bool _only_sampling_solution
     ) :
         data_for_thread(_data_for_thread)
         , tid(_tid)
         , solve(_solve)
-        , only_indep_solution(_only_indep_solution)
+        , only_sampling_solution(_only_sampling_solution)
     {}
 
     void operator()()
@@ -724,7 +729,7 @@ struct OneThreadCalc
         cls_adder();
         lbool ret;
         if (solve) {
-            ret = data_for_thread.solvers[tid]->solve_with_assumptions(data_for_thread.assumptions, only_indep_solution);
+            ret = data_for_thread.solvers[tid]->solve_with_assumptions(data_for_thread.assumptions, only_sampling_solution);
         } else {
             ret = data_for_thread.solvers[tid]->simplify_with_assumptions(data_for_thread.assumptions);
         }
@@ -756,13 +761,13 @@ struct OneThreadCalc
     const size_t tid;
     double start_time;
     bool solve;
-    bool only_indep_solution;
+    bool only_sampling_solution;
 };
 
 lbool calc(
     const vector< Lit >* assumptions,
     bool solve, CMSatPrivateData *data,
-    bool only_indep_solution = false
+    bool only_sampling_solution = false
 ) {
     //Reset the interrupt signal if it was set
     data->must_interrupt->store(false, std::memory_order_relaxed);
@@ -798,7 +803,7 @@ lbool calc(
 
         lbool ret ;
         if (solve) {
-            ret = data->solvers[0]->solve_with_assumptions(assumptions, only_indep_solution);
+            ret = data->solvers[0]->solve_with_assumptions(assumptions, only_sampling_solution);
         } else {
             ret = data->solvers[0]->simplify_with_assumptions(assumptions);
         }
@@ -814,7 +819,7 @@ lbool calc(
         ; i < data->solvers.size()
         ; i++
     ) {
-        thds.push_back(thread(OneThreadCalc(data_for_thread, i, solve, only_indep_solution)));
+        thds.push_back(thread(OneThreadCalc(data_for_thread, i, solve, only_sampling_solution)));
     }
     for(std::thread& thread : thds){
         thread.join();
@@ -831,14 +836,14 @@ lbool calc(
     return real_ret;
 }
 
-DLL_PUBLIC lbool SATSolver::solve(const vector< Lit >* assumptions, bool only_indep_solution)
+DLL_PUBLIC lbool SATSolver::solve(const vector< Lit >* assumptions, bool only_sampling_solution)
 {
     //set information data (props, confl, dec)
     data->previous_sum_conflicts = get_sum_conflicts();
     data->previous_sum_propagations = get_sum_propagations();
     data->previous_sum_decisions = get_sum_decisions();
 
-    return calc(assumptions, true, data, only_indep_solution);
+    return calc(assumptions, true, data, only_sampling_solution);
 }
 
 DLL_PUBLIC lbool SATSolver::simplify(const vector< Lit >* assumptions)
@@ -910,7 +915,7 @@ DLL_PUBLIC const char* SATSolver::get_compilation_env()
     return Solver::get_compilation_env();
 }
 
-std::string SATSolver::get_text_version_info()
+DLL_PUBLIC std::string SATSolver::get_text_version_info()
 {
     std::stringstream ss;
     ss << "c CryptoMiniSat version " << get_version() << endl;
@@ -921,11 +926,15 @@ std::string SATSolver::get_text_version_info()
     #else
     ss << "c CMS is MIT licensed" << endl;
     #endif
+    ss << "c Using Yalsat by Armin Biere, see Balint et al. Improving implementation of SLS solvers [...], SAT'14" << endl;
+    ss << "c Using WalkSAT by Henry Kautz, see Kautz and Selman Pushing the envelope: planning, propositional logic, and stochastic search, AAAI'96," << endl;
 
     #ifdef USE_GAUSS
     ss << "c Using code from 'When Boolean Satisfiability Meets Gauss-E. in a Simplex Way'" << endl;
     ss << "c       by C.-S. Han and J.-H. Roland Jiang in CAV 2012. Fixes by M. Soos" << endl;
     #endif
+    ss << "c Using CCAnr from 'CCAnr: A Conf. Checking Based Local Search Solver [...]'" << endl;
+    ss << "c       by Shaowei Cai, Chuan Luo, and Kaile Su, SAT 2015" << endl;
     ss << "c CMS compilation env " << get_compilation_env() << endl;
     #ifdef __GNUC__
     ss << "c CMS compiled with gcc version " << __VERSION__ << endl;
@@ -964,17 +973,16 @@ DLL_PUBLIC void SATSolver::set_drat(std::ostream* os, bool add_ID)
         std::cerr << "ERROR: DRAT cannot be used in multi-threaded mode" << endl;
         exit(-1);
     }
-    Drat* drat = NULL;
-    if (add_ID) {
-        drat = new DratFile<true>;
-    } else {
-        drat = new DratFile<false>;
+    if (nVars() > 0) {
+        std::cerr << "ERROR: DRAT cannot be set after variables have been added" << endl;
+        exit(-1);
     }
-    drat->setFile(os);
-    if (data->solvers[0]->drat)
-        delete data->solvers[0]->drat;
 
-    data->solvers[0]->drat = drat;
+    data->solvers[0]->add_drat(os, add_ID);
+    data->solvers[0]->conf.otfHyperbin = true;
+    data->solvers[0]->conf.doFindXors = false;
+    data->solvers[0]->conf.doCompHandler = false;
+
 }
 
 DLL_PUBLIC void SATSolver::interrupt_asap()
@@ -1067,6 +1075,15 @@ DLL_PUBLIC uint64_t SATSolver::get_sum_conflicts()
     return conlf;
 }
 
+DLL_PUBLIC uint64_t SATSolver::get_sum_conflicts() const
+{
+    uint64_t total_conflicts = 0;
+    for (Solver const* s : data->solvers) {
+        total_conflicts += s->sumConflicts;
+    }
+    return total_conflicts;
+}
+
 DLL_PUBLIC uint64_t SATSolver::get_sum_propagations()
 {
     uint64_t props = 0;
@@ -1077,6 +1094,15 @@ DLL_PUBLIC uint64_t SATSolver::get_sum_propagations()
     return props;
 }
 
+DLL_PUBLIC uint64_t SATSolver::get_sum_propagations() const
+{
+    uint64_t total_propagations = 0;
+    for (Solver const* s : data->solvers) {
+        total_propagations += s->sumPropStats.propagations;
+    }
+    return total_propagations;
+}
+
 DLL_PUBLIC uint64_t SATSolver::get_sum_decisions()
 {
     uint64_t dec = 0;
@@ -1085,6 +1111,15 @@ DLL_PUBLIC uint64_t SATSolver::get_sum_decisions()
         dec += s.sumSearchStats.decisions;
     }
     return dec;
+}
+
+DLL_PUBLIC uint64_t SATSolver::get_sum_decisions() const
+{
+    uint64_t total_decisions = 0;
+    for (Solver const* s : data->solvers) {
+        total_decisions += s->sumSearchStats.decisions;
+    }
+    return total_decisions;
 }
 
 DLL_PUBLIC uint64_t SATSolver::get_last_conflicts()
@@ -1182,4 +1217,22 @@ DLL_PUBLIC void SATSolver::set_need_decisions_reaching()
 DLL_PUBLIC bool SATSolver::get_decision_reaching_valid() const
 {
     return data->solvers[data->which_solved]->get_decision_reaching_valid();
+}
+
+
+DLL_PUBLIC void SATSolver::set_yes_comphandler()
+{
+    for (size_t i = 0; i < data->solvers.size(); ++i) {
+        Solver& s = *data->solvers[i];
+        s.conf.doCompHandler = true;
+        s.enable_comphandler();
+    }
+}
+
+DLL_PUBLIC bool SATSolver::implied_by(
+    const std::vector<Lit>& lits,
+    std::vector<Lit>& out_implied
+)
+{
+    return data->solvers[data->which_solved]->implied_by(lits, out_implied);
 }

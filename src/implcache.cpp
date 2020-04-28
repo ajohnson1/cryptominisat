@@ -22,9 +22,6 @@ THE SOFTWARE.
 
 #include "implcache.h"
 
-#ifndef TRANSCACHE_H_
-#define TRANSCACHE_H_
-
 #include "solver.h"
 #include "varreplacer.h"
 #include "varupdatehelper.h"
@@ -34,18 +31,6 @@ THE SOFTWARE.
 using namespace CMSat;
 using std::cout;
 using std::endl;
-
-//Make all literals as if propagated only by redundant
-void ImplCache::makeAllRed()
-{
-    for(vector<TransCache>::iterator
-        it = implCache.begin(), end = implCache.end()
-        ; it != end
-        ; ++it
-    ) {
-        it->makeAllRed();
-    }
-}
 
 size_t ImplCache::mem_used() const
 {
@@ -615,15 +600,6 @@ bool TransCache::mergeHelper(
     return taut;
 }
 
-//Make all literals as if propagated only by redundant
-void TransCache::makeAllRed()
-{
-    for(size_t i = 0; i < lits.size(); i++) {
-        lits[i] = LitExtra(lits[i].getLit(), false);
-    }
-
-}
-
 void TransCache::updateVars(
     const std::vector< uint32_t >& outerToInter
     , const size_t newMaxVars
@@ -669,6 +645,3 @@ void ImplCache::TryBothStats::print_short(Solver* solver) const
     << solver->conf.print_times(cpu_time)
     << endl;
 }
-
-
-#endif //TRANSCACHE_H_

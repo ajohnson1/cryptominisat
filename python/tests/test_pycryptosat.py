@@ -25,6 +25,7 @@ from __future__ import print_function
 from array import array as _array
 import sys
 import unittest
+import time
 
 
 import pycryptosat
@@ -234,6 +235,33 @@ class TestSolve(unittest.TestCase):
                 return None
         self.assertRaises(TypeError, self.solver.add_clause, Liar())
 
+    def test_get_conflict(self):
+        self.solver.add_clauses([[-1], [2], [3], [-4]])
+        assume = [-2, 3, 4]
+
+        res, model = self.solver.solve(assumptions=assume)
+        self.assertEqual(res, False)
+
+        confl = self.solver.get_conflict()
+        self.assertEqual(isinstance(confl, list), True)
+        self.assertNotIn(3, confl)
+
+        if 2 in confl:
+            self.assertIn(2, confl)
+        elif -4 in confl:
+            self.assertIn(-4, confl)
+        else:
+            self.assertEqual(False, True, msg="Either -2 or 4 should be conflicting!")
+
+        assume = [2, 4]
+        res, model = self.solver.solve(assumptions=assume)
+        self.assertEqual(res, False)
+
+        confl = self.solver.get_conflict()
+        self.assertEqual(isinstance(confl, list), True)
+        self.assertNotIn(2, confl)
+        self.assertIn(-4, confl)
+
     def test_cnf2(self):
         for cl in clauses2:
             self.solver.add_clause(cl)
@@ -266,6 +294,42 @@ class TestSolve(unittest.TestCase):
         res, _ = self.solver.solve()
         self.assertEqual(res, True)
 
+
+class TestSolveTimeLimit(unittest.TestCase):
+
+    def get_clauses(self):
+        cls = []
+        with open("tests/f400-r425-x000.cnf", "r") as f:
+            for line in f:
+                line = line.strip()
+                if len(line) == 0:
+                    continue
+                if line[0] == "p":
+                    continue
+                if line[0] == "c":
+                    continue
+                line = line.split()
+                line = [int(l.strip()) for l in line]
+                assert line[-1] == 0
+                cls.append(line[:-1])
+
+        return cls
+
+
+    def test_time(self):
+        SAT_TIME_LIMIT = 1
+        clauses = self.get_clauses() #returns a few hundred short clauses
+        t0 = time.time()
+        solver = Solver(threads=4, time_limit=SAT_TIME_LIMIT)
+        solver.add_clauses(clauses)
+        sat, sol = solver.solve()
+        took_time = time.time() - t0
+
+        # NOTE: the above CNF solves in about 1 hour.
+        # So anything below 10min is good. Setting 2s would work... no most
+        # systems, but not on overloaded CI servers
+        self.assertLess(took_time, 4)
+
 # ------------------------------------------------------------------------
 
 
@@ -281,6 +345,7 @@ def run():
     suite.addTest(unittest.makeSuite(InitTester))
     suite.addTest(unittest.makeSuite(TestSolve))
     suite.addTest(unittest.makeSuite(TestDump))
+    suite.addTest(unittest.makeSuite(TestSolveTimeLimit))
 
     runner = unittest.TextTestRunner(verbosity=2)
     result = runner.run(suite)

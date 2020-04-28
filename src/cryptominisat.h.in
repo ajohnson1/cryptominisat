@@ -43,6 +43,12 @@ namespace CMSat {
     #endif
     {
     public:
+        ////////////////////////////
+        // You can pass in a variable that if set to TRUE, will abort the
+        // solver as soon as possible. This bool can be set through a timer,
+        // or through a thread, etc. This gives you the possiblity to abort
+        // the solver any time you like, depending on some external factor
+        // such as time, or your own code's inner workings.
         SATSolver(void* config = NULL
         , std::atomic<bool>* interrupt_asap = NULL
         );
@@ -60,6 +66,7 @@ namespace CMSat {
 
         ////////////////////////////
         // Solving and simplifying
+        // You can call solve() multiple times: incremental mode is supported!
         ////////////////////////////
 
         lbool solve(const std::vector<Lit>* assumptions = 0, bool only_indep_solution = false); //solve the problem, optionally with assumptions. If only_indep_solution is set, only the independent variables set with set_independent_vars() are returned in the solution
@@ -91,8 +98,22 @@ namespace CMSat {
 
         void set_num_threads(unsigned n); //Number of threads to use. Must be set before any vars/clauses are added
         void set_allow_otf_gauss(); //allow on-the-fly gaussian elimination
-        void set_max_time(double max_time); //max time to run to on next solve() call
-        void set_max_confl(int64_t max_confl); //max conflict to run to on next solve() call
+        /**
+         * CPU time (in seconds) that can be consumed before the next call to solve() must return
+         *
+         * Because the elapsed CPU time depends on both the number of
+         * threads, and the activity of these threads, the elapsed time
+         * can wildly differ from wall clock time.
+         * 
+         * \pre max_time >= 0
+         */
+        void set_max_time(double max_time);
+        /**
+         * Conflicts that can be consumed before the next call to solve() must return
+         *
+         * \pre max_confl >= 0
+         */
+        void set_max_confl(int64_t max_confl);
         void set_verbosity(unsigned verbosity = 0); //default is 0, silent
         void set_default_polarity(bool polarity); //default polarity when branching for all vars
         void set_no_simplify(); //never simplify
@@ -100,8 +121,9 @@ namespace CMSat {
         void set_no_equivalent_lit_replacement(); //don't replace equivalent literals
         void set_no_bva(); //No bounded variable addition
         void set_no_bve(); //No bounded variable elimination
+        void set_yes_comphandler(); //Allow component handler to work
         void set_greedy_undef(); //Try to set variables to l_Undef in solution
-        void set_independent_vars(std::vector<uint32_t>* ind_vars);
+        void set_sampling_vars(std::vector<uint32_t>* sampl_vars);
         void set_timeout_all_calls(double secs); //max timeout on all subsequent solve() or simplify
         void set_up_for_scalmc(); //used to set the solver up for ScalMC configuration
         void set_need_decisions_reaching(); //set it before calling solve()
@@ -131,8 +153,11 @@ namespace CMSat {
         ////////////////////////////
 
         uint64_t get_sum_conflicts(); //get total number of conflicts of all time of all threads
+        uint64_t get_sum_conflicts() const; //!< Return sum of all conflicts since construction across all the threads
         uint64_t get_sum_propagations();  //get total number of propagations of all time made by all threads
+        uint64_t get_sum_propagations() const; //!< Returns sum of all propagations since construction across all the threads
         uint64_t get_sum_decisions(); //get total number of decisions of all time made by all threads
+        uint64_t get_sum_decisions() const; //!< Returns sum of all decisions since construction across all the threads
 
         void print_stats() const; //print solving stats. Call after solve()/simplify()
         void set_drat(std::ostream* os, bool set_ID); //set drat to ostream, e.g. stdout or a file
@@ -155,10 +180,18 @@ namespace CMSat {
         // EXPERIMENTAL
         std::vector<std::pair<std::vector<uint32_t>, bool> > get_recovered_xors(bool elongate) const; //get XORs recovered. If "elongate" is TRUE, then variables shared ONLY by two XORs will be XORed together
 
+        //Given a set of literals to enqueue, returns:
+        // 1) Whether they imply SAT/UNSAT. If "true": SAT. If "false": UNSAT
+        // 2) into "out_implied" the set of literals they imply, including the literals themselves
+        // NOTES:
+        // * You may get back some of the literals you gave
+        // * Order is not guaranteed: literals you gave as input may end up at the end or may not end up at all
+        // * It only returns literals that are newly implied. So you must call get_zero_assigned_lits() before to be sure you know what literals are implied at decision level 0
+        bool implied_by(
+            const std::vector<Lit>& lits, std::vector<Lit>& out_implied);
+
         //////////////////////
         //Below must be done in-order. Multi-threading not allowed.
-        // EXPERIMENTAL!!!
-
         void start_getting_small_clauses(uint32_t max_len, uint32_t max_glue);
         bool get_next_small_clause(std::vector<Lit>& ret); //returns FALSE if no more
         void end_getting_small_clauses();

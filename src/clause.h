@@ -118,6 +118,7 @@ struct ClauseStats
     {
         glue = 1000;
         which_red_array = 2;
+        //TODO it's weird, it has been tested to be better with "1"
         activity = 1;
         ttl = 0;
         marked_clause = false;
@@ -128,7 +129,7 @@ struct ClauseStats
     uint32_t marked_clause:1;
     uint32_t ttl:2;
     uint32_t which_red_array:2;
-    float   activity = 1.0;
+    float   activity = 0.0f;
     uint32_t last_touched = 0;
     #ifdef STATS_NEEDED
     uint32_t dump_number = std::numeric_limits<uint32_t>::max();
@@ -207,6 +208,8 @@ public:
     uint16_t isRemoved:1; ///<Is this clause queued for removal?
     uint16_t isFreed:1; ///<Has this clause been marked as freed by the ClauseAllocator ?
     uint16_t is_distilled:1;
+    uint16_t is_ternary_resolved:1;
+    uint16_t is_ternary:1;
     uint16_t occurLinked:1;
     uint16_t must_recalc_abst:1;
     uint16_t _used_in_xor:1;
@@ -250,6 +253,8 @@ public:
         isRed = false;
         isRemoved = false;
         is_distilled = false;
+        is_ternary_resolved = false;
+        is_ternary = false;
         must_recalc_abst = true;
         _used_in_xor = false;
         _gauss_temp_cl = false;
@@ -323,6 +328,8 @@ public:
     void setStrenghtened()
     {
         must_recalc_abst = true;
+        //is_ternary_resolved = false; //probably not a good idea
+        //is_distilled = false; //TODO?
     }
 
     void recalc_abst_if_needed()
@@ -351,10 +358,8 @@ public:
         isRed = false;
     }
 
-    void makeRed(const uint32_t newGlue, const double init_activity = 1.0)
+    void makeRed()
     {
-        stats.glue = newGlue;
-        stats.activity = init_activity;
         isRed = true;
     }
 

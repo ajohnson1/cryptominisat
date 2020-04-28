@@ -130,43 +130,50 @@ void Main::readInAFile(SATSolver* solver2, const string& filename)
         exit(-1);
     }
 
-    if (!independent_vars_str.empty() && !parser.independent_vars.empty()) {
-        cerr << "ERROR! Independent vars set in console but also in CNF." << endl;
+    if (!sampling_vars_str.empty() && !parser.sampling_vars.empty()) {
+        cerr << "ERROR! Sampling vars set in console but also in CNF." << endl;
         exit(-1);
     }
 
-    if (!independent_vars_str.empty()) {
-        assert(independent_vars.empty());
+    if (!sampling_vars_str.empty()) {
+        assert(sampling_vars.empty());
 
-        std::stringstream ss(independent_vars_str);
+        std::stringstream ss(sampling_vars_str);
         uint32_t i;
         while (ss >> i)
         {
             const uint32_t var = i-1;
-            independent_vars.push_back(var);
+            sampling_vars.push_back(var);
 
             if (ss.peek() == ',' || ss.peek() == ' ')
                 ss.ignore();
         }
     } else {
-        independent_vars.swap(parser.independent_vars);
+        sampling_vars.swap(parser.sampling_vars);
     }
 
-    if (independent_vars.empty()) {
-        if (only_indep_solution) {
-            cout << "ERROR: only independent vars are requested in the solution, but no independent vars have been set!" << endl;
+    if (sampling_vars.empty()) {
+        if (only_sampling_solution) {
+            cout << "ERROR: only sampling vars are requested in the solution, but no sampling vars have been set!" << endl;
             exit(-1);
         }
     } else {
-        solver2->set_independent_vars(&independent_vars);
-        cout << "c Independent vars set: ";
-        for(size_t i = 0; i < independent_vars.size(); i++) {
-            const uint32_t v = independent_vars[i];
-            cout << v+1;
-            if (i+1 != independent_vars.size())
-                cout << ",";
+        solver2->set_sampling_vars(&sampling_vars);
+        if (sampling_vars.size() > 100) {
+            cout
+            << "c Sampling var set contains over 100 variables, not displaying"
+            << endl;
+        } else {
+            cout << "c Sampling vars set (total num: "
+            << sampling_vars.size() << " ) : ";
+            for(size_t i = 0; i < sampling_vars.size(); i++) {
+                const uint32_t v = sampling_vars[i];
+                cout << v+1;
+                if (i+1 != sampling_vars.size())
+                    cout << ",";
+            }
+            cout << endl;
         }
-        cout << endl;
     }
     call_after_parse();
 
@@ -213,6 +220,7 @@ void Main::readInStandardInput(SATSolver* solver2)
 
 void Main::parseInAllFiles(SATSolver* solver2)
 {
+    const double myTimeTotal = cpuTimeTotal();
     const double myTime = cpuTime();
 
     //First read normal extra files
@@ -235,11 +243,19 @@ void Main::parseInAllFiles(SATSolver* solver2)
     }
 
     if (conf.verbosity) {
-        cout
-        << "c Parsing time: "
-        << std::fixed << std::setprecision(2)
-        << (cpuTime() - myTime)
-        << " s" << endl;
+        if (num_threads > 1) {
+            cout
+            << "c Sum parsing time among all threads (wall time will differ): "
+            << std::fixed << std::setprecision(2)
+            << (cpuTimeTotal() - myTimeTotal)
+            << " s" << endl;
+        } else {
+            cout
+            << "c Parsing time: "
+            << std::fixed << std::setprecision(2)
+            << (cpuTime() - myTime)
+            << " s" << endl;
+        }
     }
 }
 
@@ -266,20 +282,32 @@ void Main::printResultFunc(
 
     if (ret == l_True && (printResult || toFile)) {
         if (toFile) {
-            for (uint32_t var = 0; var < solver->nVars(); var++) {
+            auto fun = [&](uint32_t var) {
                 if (solver->get_model()[var] != l_Undef) {
                     *os << ((solver->get_model()[var] == l_True)? "" : "-") << var+1 << " ";
+                }
+            };
+
+            if (sampling_vars.empty() || !only_sampling_solution) {
+                for (uint32_t var = 0; var < solver->nVars(); var++) {
+                    fun(var);
+                }
+
+            } else {
+                for (uint32_t var: sampling_vars) {
+                    fun(var);
                 }
             }
             *os << "0" << endl;
         } else {
-            const uint32_t num_undef = print_model(os, solver);
+            uint32_t num_undef;
+            if (sampling_vars.empty() || !only_sampling_solution) {
+                num_undef = print_model(solver, os);
+            } else {
+                num_undef = print_model(solver, os, &sampling_vars);
+            }
             if (num_undef && !toFile && conf.verbosity) {
-                if (only_indep_solution) {
-                    cout << "c NOTE: some variables' value are NOT set -- you ONLY asked for the independent set's values: '--onlyindep'" << endl;
-                } else {
-                   cout << "c NOTE: " << num_undef << " variables are NOT set" << endl;
-                }
+                cout << "c NOTE: " << num_undef << " variables are NOT set." << endl;
             }
         }
     }
@@ -298,10 +326,10 @@ void Main::add_supported_options()
         , "[0..] Random seed")
     ("threads,t", po::value(&num_threads)->default_value(1)
         ,"Number of threads")
-    ("maxtime", po::value(&conf.maxTime)->default_value(conf.maxTime, "MAX")
-        , "Stop solving after this much time (s)")
-    ("maxconfl", po::value(&conf.max_confl)->default_value(conf.max_confl, "MAX")
-        , "Stop solving after this many conflicts")
+    ("maxtime", po::value(&maxtime),
+        "Stop solving after this much time (s)")
+    ("maxconfl", po::value(&maxconfl),
+        "Stop solving after this many conflicts")
 //     ("undef", po::value(&conf.greedy_undef)->default_value(conf.greedy_undef)
 //         , "Set as many variables in solution to UNDEF as possible if solution is SAT")
     ("mult,m", po::value(&conf.orig_global_timeout_multiplier)->default_value(conf.orig_global_timeout_multiplier)
@@ -312,6 +340,8 @@ void Main::add_supported_options()
         , "0 = normal run, 1 = preprocess and dump, 2 = read back dump and solution to produce final solution")
     ("polar", po::value<string>()->default_value("auto")
         , "{true,false,rnd,auto} Selects polarity mode. 'true' -> selects only positive polarity when branching. 'false' -> selects only negative polarity when branching. 'auto' -> selects last polarity used (also called 'caching')")
+    ("chronophase", po::value(&conf.chronophase)->default_value(conf.chronophase)
+        , "Phase to choose during chrono BT. 0 = default, 1 = lsids")
     #ifdef STATS_NEEDED
     ("clid", po::bool_switch(&clause_ID_needed)
         , "Add clause IDs to DRAT output")
@@ -322,6 +352,9 @@ void Main::add_supported_options()
 
     std::ostringstream s_blocking_multip;
     s_blocking_multip << std::setprecision(4) << conf.blocking_restart_multip;
+
+    std::ostringstream s_local_glue_multiplier;
+    s_local_glue_multiplier << std::setprecision(4) << conf.local_glue_multiplier;
 
     po::options_description restartOptions("Restart options");
     restartOptions.add_options()
@@ -337,10 +370,8 @@ void Main::add_supported_options()
         , "Multiplier used for blocking restart cut-off (called 'R' in Glucose 3.0)")
     ("lwrbndblkrest", po::value(&conf.lower_bound_for_blocking_restart)->default_value(conf.lower_bound_for_blocking_restart)
         , "Lower bound on blocking restart -- don't block before this many conflicts")
-    ("locgmult" , po::value(&conf.local_glue_multiplier)->default_value(conf.local_glue_multiplier)
+    ("locgmult" , po::value(&conf.local_glue_multiplier)->default_value(conf.local_glue_multiplier, s_local_glue_multiplier.str())
         , "The multiplier used to determine if we should restart during glue-based restart")
-    ("brokengluerest", po::value(&conf.broken_glue_restart)->default_value(conf.broken_glue_restart)
-        , "Should glue restart be broken as before 8e74cb5010bb4")
     ("ratiogluegeom", po::value(&conf.ratio_glue_geom)->default_value(conf.ratio_glue_geom)
         , "Ratio of glue vs geometric restarts -- more is more glue")
     ;
@@ -358,14 +389,16 @@ void Main::add_supported_options()
         , "Glue value for lev 1 cut ('give another shot'")
     ("adjustglue", po::value(&conf.adjust_glue_if_too_many_low)->default_value(conf.adjust_glue_if_too_many_low, s_adjust_low.str())
         , "If more than this % of clauses is LOW glue (level 0) then lower the glue cutoff by 1 -- once and never again")
-    ("ml", po::value(&conf.guess_cl_effectiveness)->default_value(conf.guess_cl_effectiveness)
-        , "Use ML model to guess clause effectiveness")
     ("everylev1", po::value(&conf.every_lev1_reduce)->default_value(conf.every_lev1_reduce)
         , "Reduce lev1 clauses every N")
     ("everylev2", po::value(&conf.every_lev2_reduce)->default_value(conf.every_lev2_reduce)
         , "Reduce lev2 clauses every N")
     ("lev1usewithin", po::value(&conf.must_touch_lev1_within)->default_value(conf.must_touch_lev1_within)
         , "Learnt clause must be used in lev1 within this timeframe or be dropped to lev2")
+    ;
+
+    po::options_description red_cl_dump_opts("Clause dumping after problem finishing");
+    reduceDBOptions.add_options()
     ("dumpred", po::value(&dump_red_fname)->default_value(dump_red_fname)
         , "Dump redundant clauses of gluecut0&1 to this filename")
     ("dumpredmaxlen", po::value(&dump_red_max_len)->default_value(dump_red_max_len)
@@ -391,6 +424,12 @@ void Main::add_supported_options()
         , "variable activity increase divider (MUST be smaller than multiplier)")
     ("vincstart", po::value(&conf.var_inc_vsids_start)->default_value(conf.var_inc_vsids_start)
         , "variable activity increase starts with this value. Make sure that this multiplied by multiplier and divided by divider is larger than itself")
+    ("vsidsalternate", po::value(&conf.alternate_vsids)->default_value(conf.alternate_vsids)
+         , "Alternate VSIDS values between iterations")
+    ("vsidsalterval1", po::value(&conf.alternate_vsids_decay_rate1)->default_value(conf.alternate_vsids_decay_rate1)
+         , "Alternate value 1 of VSIDS decay rate -- active when alternation is ON")
+    ("vsidsalterval2", po::value(&conf.alternate_vsids_decay_rate2)->default_value(conf.alternate_vsids_decay_rate2)
+        , "Alternate value 2 of VSIDS decay rate -- active when alternation is ON")
     ("freq", po::value(&conf.random_var_freq)->default_value(conf.random_var_freq, s_random_var_freq.str())
         , "[0 - 1] freq. of picking var at random")
     ("maple", po::value(&conf.maple)->default_value(conf.maple)
@@ -399,6 +438,12 @@ void Main::add_supported_options()
         , "Use maple N-1 of N rounds. Normally, N is 2, so used every other round. Set to 3 so it will use maple 2/3rds of the time.")
     ("maplemorebump", po::value(&conf.more_maple_bump_high_glue)->default_value(conf.more_maple_bump_high_glue)
         , "Bump variable usefulness more when glue is HIGH")
+    ("maplealternate", po::value(&conf.alternate_maple)->default_value(conf.alternate_maple)
+         , "Alternate maple values between iterations")
+    ("maplealterval1", po::value(&conf.alternate_maple_decay_rate1)->default_value(conf.alternate_maple_decay_rate1)
+         , "Alternate value 1 of maple decay rate -- active when alternation is ON")
+    ("maplealterval2", po::value(&conf.alternate_maple_decay_rate2)->default_value(conf.alternate_maple_decay_rate2)
+        , "Alternate value 2 of maple decay rate -- active when alternation is ON")
     ;
 
 
@@ -408,8 +453,26 @@ void Main::add_supported_options()
         , "Search for given amount of solutions. Thanks to Jannis Harder for the decision-based banning idea")
     ("debuglib", po::value<string>(&debugLib)
         , "MainSolver at specific 'solve()' points in CNF file")
-    ("dumpresult", po::value(&resultFilename)
-        , "Write solution(s) to this file")
+    ;
+
+    po::options_description sls_options("Stochastic Local Search options");
+    sls_options.add_options()
+    ("sls", po::value(&conf.doSLS)->default_value(conf.doSLS)
+        , "Run SLS during simplification")
+    ("slstype", po::value(&conf.which_sls)->default_value(conf.which_sls)
+        , "Which SLS to run. Allowed values: walksat, yalsat, ccnr")
+    ("slsmaxmem", po::value(&conf.sls_memoutMB)->default_value(conf.sls_memoutMB)
+        , "Maximum number of MB to give to SLS solver. Doesn't run SLS solver if the memory usage would be more than this.")
+    ("slseveryn", po::value(&conf.sls_every_n)->default_value(conf.sls_every_n)
+        , "Run SLS solver every N simplifications only")
+    ("yalsatmems", po::value(&conf.yalsat_max_mems)->default_value(conf.yalsat_max_mems)
+        , "Run Yalsat with this many mems*million timeout. Limits time of yalsat run")
+    ("walksatruns", po::value(&conf.walksat_max_runs)->default_value(conf.walksat_max_runs)
+        , "Max 'runs' for WalkSAT. Limits time of WalkSAT run")
+    ("slsgetphase", po::value(&conf.sls_get_phase)->default_value(conf.sls_get_phase)
+        , "Get phase from SLS solver, set as new phase for CDCL")
+    ("slstobump", po::value(&conf.sls_how_many_to_bump)->default_value(conf.sls_how_many_to_bump)
+        , "How many variables to bump in CCNR")
     ;
 
     po::options_description probeOptions("Probing options");
@@ -429,10 +492,13 @@ void Main::add_supported_options()
     ;
 
     std::ostringstream ssERatio;
-    ssERatio << std::setprecision(4) << "norm: " << conf.varElimRatioPerIter << " preproc: " << 1.0;
+    ssERatio << std::setprecision(4) << conf.varElimRatioPerIter;
 
-    po::options_description simplificationOptions("Simplification options");
-    simplificationOptions.add_options()
+    std::ostringstream s_num_conflicts_of_search_inc;
+    s_num_conflicts_of_search_inc << std::setprecision(4) << conf.num_conflicts_of_search_inc;
+
+    po::options_description simp_schedules("Simplification schedules");
+    simp_schedules.add_options()
     ("schedsimp", po::value(&conf.do_simplify_problem)->default_value(conf.do_simplify_problem)
         , "Perform simplification rounds. If 0, we never perform any.")
     ("presimp", po::value(&conf.simplify_at_startup)->default_value(conf.simplify_at_startup)
@@ -441,6 +507,8 @@ void Main::add_supported_options()
         , "Perform simplification at EVERY start -- only matters in library mode")
     ("nonstop,n", po::value(&conf.never_stop_search)->default_value(conf.never_stop_search)
         , "Never stop the search() process in class SATSolver")
+    ("maxnumsimppersolve", po::value(&conf.max_num_simplify_per_solve_call)->default_value(conf.max_num_simplify_per_solve_call)
+        , "Maximum number of simplifiactions to perform for every solve() call. After this, no more inprocessing will take place.")
 
     ("schedule", po::value(&conf.simplify_schedule_nonstartup)
         , "Schedule for simplification during run")
@@ -453,8 +521,70 @@ void Main::add_supported_options()
 
     ("confbtwsimp", po::value(&conf.num_conflicts_of_search)->default_value(conf.num_conflicts_of_search)
         , "Start first simplification after this many conflicts")
-    ("confbtwsimpinc", po::value(&conf.num_conflicts_of_search_inc)->default_value(conf.num_conflicts_of_search_inc)
+    ("confbtwsimpinc", po::value(&conf.num_conflicts_of_search_inc)->default_value(conf.num_conflicts_of_search_inc, s_num_conflicts_of_search_inc.str())
         , "Simp rounds increment by this power of N")
+    ;
+
+    std::ostringstream tern_keep;
+    tern_keep << std::setprecision(2) << conf.ternary_keep_mult;
+
+    std::ostringstream tern_max_create;
+    tern_max_create << std::setprecision(2) << conf.ternary_max_create;
+
+    po::options_description tern_res_options("Ternary resolution");
+    tern_res_options.add_options()
+    ("tern", po::value(&conf.doTernary)->default_value(conf.doTernary)
+        , "Perform Ternary resolution'")
+    ("terntimelim", po::value(&conf.ternary_res_time_limitM)->default_value(conf.ternary_res_time_limitM)
+        , "Time-out in bogoprops M of ternary resolution as per paper 'Look-Ahead Versus Look-Back for Satisfiability Problems'")
+    ("ternkeep", po::value(&conf.ternary_keep_mult)->default_value(conf.ternary_keep_mult, tern_keep.str())
+        , "Keep ternary clauses only if they are touched within this multiple of 'lev1usewithin'")
+    ("terncreate", po::value(&conf.ternary_max_create)->default_value(conf.ternary_max_create, tern_max_create.str())
+        , "Create only this multiple (of linked in cls) ternary clauses per simp run")
+    ;
+
+    po::options_description occ_mem_limits("Occ-based simplification memory limits");
+    occ_mem_limits.add_options()
+    ("occredmax", po::value(&conf.maxRedLinkInSize)->default_value(conf.maxRedLinkInSize)
+        , "Don't add to occur list any redundant clause larger than this")
+    ("occredmaxmb", po::value(&conf.maxOccurRedMB)->default_value(conf.maxOccurRedMB)
+        , "Don't allow redundant occur size to be beyond this many MB")
+    ("occirredmaxmb", po::value(&conf.maxOccurIrredMB)->default_value(conf.maxOccurIrredMB)
+        , "Don't allow irredundant occur size to be beyond this many MB")
+    ;
+
+    po::options_description sub_str_time_limits("Occ-based subsumption and strengthening time limits");
+    sub_str_time_limits.add_options()
+    ("strengthen", po::value(&conf.do_strengthen_with_occur)->default_value(conf.do_strengthen_with_occur)
+        , "Perform clause contraction through self-subsuming resolution as part of the occurrence-subsumption system")
+    ("substimelim", po::value(&conf.subsumption_time_limitM)->default_value(conf.subsumption_time_limitM)
+        , "Time-out in bogoprops M of subsumption of long clauses with long clauses, after computing occur")
+    ("substimelimbinratio", po::value(&conf.subsumption_time_limit_ratio_sub_str_w_bin)->default_value(conf.subsumption_time_limit_ratio_sub_str_w_bin)
+        , "Ratio of subsumption time limit to spend on sub&str long clauses with bin")
+    ("substimelimlongratio", po::value(&conf.subsumption_time_limit_ratio_sub_w_long)->default_value(conf.subsumption_time_limit_ratio_sub_w_long)
+        , "Ratio of subsumption time limit to spend on sub long clauses with long")
+    ("strstimelim", po::value(&conf.strengthening_time_limitM)->default_value(conf.strengthening_time_limitM)
+        , "Time-out in bogoprops M of strengthening of long clauses with long clauses, after computing occur")
+    ("sublonggothrough", po::value(&conf.subsume_gothrough_multip)->default_value(conf.subsume_gothrough_multip)
+        , "How many times go through subsume")
+    ;
+
+    po::options_description bva_options("BVA options");
+    bva_options.add_options()
+    ("bva", po::value(&conf.do_bva)->default_value(conf.do_bva)
+        , "Perform bounded variable addition")
+    ("bvaeveryn", po::value(&conf.bva_every_n)->default_value(conf.bva_every_n)
+        , "Perform BVA only every N occ-simplify calls")
+    ("bvalim", po::value(&conf.bva_limit_per_call)->default_value(conf.bva_limit_per_call)
+        , "Maximum number of variables to add by BVA per call")
+    ("bva2lit", po::value(&conf.bva_also_twolit_diff)->default_value(conf.bva_also_twolit_diff)
+        , "BVA with 2-lit difference hack, too. Beware, this reduces the effectiveness of 1-lit diff")
+    ("bvato", po::value(&conf.bva_time_limitM)->default_value(conf.bva_time_limitM)
+        , "BVA time limit in bogoprops M")
+    ;
+
+    po::options_description bve_options("BVE options");
+    bve_options.add_options()
     ("varelim", po::value(&conf.doVarElim)->default_value(conf.doVarElim)
         , "Perform variable elimination as per Een and Biere")
     ("varelimto", po::value(&conf.varelim_time_limitM)->default_value(conf.varelim_time_limitM)
@@ -463,32 +593,12 @@ void Main::add_supported_options()
         , "Do BVE until the resulting no. of clause increase is less than X. Only power of 2 makes sense, i.e. 2,4,8...")
     ("emptyelim", po::value(&conf.do_empty_varelim)->default_value(conf.do_empty_varelim)
         , "Perform empty resolvent elimination using bit-map trick")
-    ("strengthen", po::value(&conf.do_strengthen_with_occur)->default_value(conf.do_strengthen_with_occur)
-        , "Perform clause contraction through self-subsuming resolution as part of the occurrence-subsumption system")
-    ("bva", po::value(&conf.do_bva)->default_value(conf.do_bva)
-        , "Perform bounded variable addition")
-    ("bvalim", po::value(&conf.bva_limit_per_call)->default_value(conf.bva_limit_per_call)
-        , "Maximum number of variables to add by BVA per call")
-    ("bva2lit", po::value(&conf.bva_also_twolit_diff)->default_value(conf.bva_also_twolit_diff)
-        , "BVA with 2-lit difference hack, too. Beware, this reduces the effectiveness of 1-lit diff")
-    ("bvato", po::value(&conf.bva_time_limitM)->default_value(conf.bva_time_limitM)
-        , "BVA time limit in bogoprops M")
+    ("varelimmaxmb", po::value(&conf.var_linkin_limit_MB)->default_value(conf.var_linkin_limit_MB)
+        , "Maximum extra MB of memory to use for new clauses during varelim")
     ("eratio", po::value(&conf.varElimRatioPerIter)->default_value(conf.varElimRatioPerIter, ssERatio.str())
         , "Eliminate this ratio of free variables at most per variable elimination iteration")
     ("skipresol", po::value(&conf.skip_some_bve_resolvents)->default_value(conf.skip_some_bve_resolvents)
         , "Skip BVE resolvents in case they belong to a gate")
-    ("occredmax", po::value(&conf.maxRedLinkInSize)->default_value(conf.maxRedLinkInSize)
-        , "Don't add to occur list any redundant clause larger than this")
-    ("occirredmaxmb", po::value(&conf.maxOccurIrredMB)->default_value(conf.maxOccurIrredMB)
-        , "Don't allow irredundant occur size to be beyond this many MB")
-    ("occredmaxmb", po::value(&conf.maxOccurRedMB)->default_value(conf.maxOccurRedMB)
-        , "Don't allow redundant occur size to be beyond this many MB")
-    ("substimelim", po::value(&conf.subsumption_time_limitM)->default_value(conf.subsumption_time_limitM)
-        , "Time-out in bogoprops M of subsumption of long clauses with long clauses, after computing occur")
-    ("strstimelim", po::value(&conf.strengthening_time_limitM)->default_value(conf.strengthening_time_limitM)
-        , "Time-out in bogoprops M of strengthening of long clauses with long clauses, after computing occur")
-    ("agrelimtimelim", po::value(&conf.aggressive_elim_time_limitM)->default_value(conf.aggressive_elim_time_limitM)
-        , "Time-out in bogoprops M of aggressive(=uses reverse distillation) var-elimination")
     ;
 
     po::options_description xorOptions("XOR-related options");
@@ -552,8 +662,6 @@ void Main::add_supported_options()
         , "Use cache for otf more minim of learnt clauses")
     ("moremorealways", po::value(&conf.doAlwaysFMinim)->default_value(conf.doAlwaysFMinim)
         , "Always strong-minimise clause")
-    ("otfsubsume", po::value(&conf.doOTFSubsume)->default_value(conf.doOTFSubsume)
-        , "Perform on-the-fly subsumption")
     ("decbased", po::value(&conf.do_decision_based_cl)->default_value(conf.do_decision_based_cl)
         , "Create decision-based conflict clauses when the UIP clause is too large")
     ("decbasemaxlev", po::value(&conf.decision_based_cl_max_levels)->default_value(conf.decision_based_cl_max_levels)
@@ -568,6 +676,12 @@ void Main::add_supported_options()
         , "Update glues while analyzing")
     ("otfhyper", po::value(&conf.otfHyperbin)->default_value(conf.otfHyperbin)
         , "Perform hyper-binary resolution at dec. level 1 after every restart and during probing")
+    ;
+
+    po::options_description chrono_bt_opts("Propagation options");
+    chrono_bt_opts.add_options()
+    ("diffdeclevelchrono", po::value(&conf.diff_declev_for_chrono)->default_value(conf.diff_declev_for_chrono)
+        , "Difference in decision level is more than this, perform chonological backtracking instead of non-chronological backtracking. Giving -1 means it is never turned on (overrides '--confltochrono -1' in this case).")
     ;
 
 
@@ -605,6 +719,8 @@ void Main::add_supported_options()
         , "Print assignment if solution is SAT")
     ("restartprint", po::value(&conf.print_restart_line_every_n_confl)->default_value(conf.print_restart_line_every_n_confl)
         , "Print restart status lines at least every N conflicts")
+    ("dumpresult", po::value(&resultFilename)
+        , "Write solution(s) to this file")
     ;
 
     po::options_description componentOptions("Component options");
@@ -618,7 +734,7 @@ void Main::add_supported_options()
     ("compslimit", po::value(&conf.comp_find_time_limitM)->default_value(conf.comp_find_time_limitM)
         , "Limit how much time is spent in component-finding");
 
-    po::options_description distillOptions("Misc options");
+    po::options_description distillOptions("Distill options");
     distillOptions.add_options()
     //("noparts", "Don't find&solve subproblems with subsolvers")
     ("distill", po::value(&conf.do_distill_clauses)->default_value(conf.do_distill_clauses)
@@ -627,6 +743,26 @@ void Main::add_supported_options()
         , "Maximum number of Mega-bogoprops(~time) to spend on vivifying/distilling long cls by enqueueing and propagating")
     ("distillto", po::value(&conf.distill_time_limitM)->default_value(conf.distill_time_limitM)
         , "Maximum time in bogoprops M for distillation")
+    ("distillincconf", po::value(&conf.distill_increase_conf_ratio)->default_value(conf.distill_increase_conf_ratio)
+        , "Multiplier for current number of conflicts OTF distill")
+    ("distillminconf", po::value(&conf.distill_min_confl)->default_value(conf.distill_min_confl)
+        , "Minimum number of conflicts between OTF distill")
+    ("distilltier1ratio", po::value(&conf.distill_red_tier1_ratio)->default_value(conf.distill_red_tier1_ratio)
+        , "How much of tier 1 to distill")
+    ;
+
+    po::options_description mem_save_opts("Memory saving options");
+    mem_save_opts.add_options()
+    ("renumber", po::value(&conf.doRenumberVars)->default_value(conf.doRenumberVars)
+        , "Renumber variables to increase CPU cache efficiency")
+    ("savemem", po::value(&conf.doSaveMem)->default_value(conf.doSaveMem)
+        , "Save memory by deallocating variable space after renumbering. Only works if renumbering is active.")
+    ("mustrenumber", po::value(&conf.must_renumber)->default_value(conf.must_renumber)
+        , "Treat all 'renumber' strategies as 'must-renumber'")
+    ("fullwatchconseveryn", po::value(&conf.full_watch_consolidate_every_n_confl)->default_value(conf.full_watch_consolidate_every_n_confl)
+        , "Consolidate watchlists fully once every N conflicts. Scheduled during simplification rounds.")
+    ("consolidatestaticorder", po::value(&conf.static_mem_consolidate_order)->default_value(conf.static_mem_consolidate_order)
+        , "Consolidate clause memory in static order. If set to 0, it's consolidated in activity order")
     ;
 
     po::options_description miscOptions("Misc options");
@@ -634,12 +770,7 @@ void Main::add_supported_options()
     //("noparts", "Don't find&solve subproblems with subsolvers")
     ("strcachemaxm", po::value(&conf.watch_cache_stamp_based_str_time_limitM)->default_value(conf.watch_cache_stamp_based_str_time_limitM)
         , "Maximum number of Mega-bogoprops(~time) to spend on vivifying long irred cls through watches, cache and stamps")
-    ("renumber", po::value(&conf.doRenumberVars)->default_value(conf.doRenumberVars)
-        , "Renumber variables to increase CPU cache efficiency")
-    ("savemem", po::value(&conf.doSaveMem)->default_value(conf.doSaveMem)
-        , "Save memory by deallocating variable space after renumbering. Only works if renumbering is active.")
-    ("fullwatchconseveryn", po::value(&conf.full_watch_consolidate_every_n_confl)->default_value(conf.full_watch_consolidate_every_n_confl)
-        , "Consolidate watchlists fully once every N conflicts. Scheduled during simplification rounds.")
+
 
     ("implicitmanip", po::value(&conf.doStrSubImplicit)->default_value(conf.doStrSubImplicit)
         , "Subsume and strengthen implicit clauses with each other")
@@ -654,7 +785,7 @@ void Main::add_supported_options()
     ("reconfat", po::value(&conf.reconfigure_at)->default_value(conf.reconfigure_at)
         , "Reconfigure after this many simplifications")
     ("reconf", po::value(&conf.reconfigure_val)->default_value(conf.reconfigure_val)
-        , "Reconfigure after some time to this solver configuration [0..15]")
+        , "Reconfigure after some time to this solver configuration [3,4,6,7,12,13,14,15,16]")
     ;
 
     hiddenOptions.add_options()
@@ -666,23 +797,25 @@ void Main::add_supported_options()
         , "Interrupt threads cleanly, all the time")
     ("zero-exit-status", po::bool_switch(&zero_exit_status)
         , "Exit with status zero in case the solving has finished without an issue")
-    ("input", po::value< vector<string> >(), "file(s) to read")
     ("printtimes", po::value(&conf.do_print_times)->default_value(conf.do_print_times)
         , "Print time it took for each simplification run. If set to 0, logs are easier to compare")
-    ("drat,d", po::value(&dratfilname)
-        , "Put DRAT verification information into this file")
     ("savedstate", po::value(&conf.saved_state_file)->default_value(conf.saved_state_file)
         , "The file to save the saved state of the solver")
     ("maxsccdepth", po::value(&conf.max_scc_depth)->default_value(conf.max_scc_depth)
         , "The maximum for scc search depth")
     ("simdrat", po::value(&conf.simulate_drat)->default_value(conf.simulate_drat)
-        , "The maximum for scc search depth")
+        , "Simulate DRAT")
     ("dumpdecformodel", po::value(&decisions_for_model_fname)->default_value(decisions_for_model_fname)
         , "Decisions for model will be dumped here")
-    ("indep", po::value(&independent_vars_str)->default_value(independent_vars_str)
-        , "Independent vars, separated by comma")
-    ("onlyindep", po::bool_switch(&only_indep_solution)
-        , "Independent vars, separated by comma")
+    ("sampling", po::value(&sampling_vars_str)->default_value(sampling_vars_str)
+        , "Sampling vars, separated by comma")
+    ("onlysampling", po::bool_switch(&only_sampling_solution)
+        , "Print and ban(!) solutions only in terms of variables declared in 'c ind' or as --sampling '...'")
+
+    //these a kind of special and determine positional options' meanings
+    ("input", po::value< vector<string> >(), "file(s) to read")
+    ("drat,d", po::value(&dratfilname)
+        , "Put DRAT verification information into this file")
     ;
 
 #ifdef USE_GAUSS
@@ -711,15 +844,24 @@ void Main::add_supported_options()
     .add(restartOptions)
     .add(printOptions)
     .add(propOptions)
+    .add(chrono_bt_opts)
     .add(reduceDBOptions)
+    .add(red_cl_dump_opts)
     .add(varPickOptions)
     .add(conflOptions)
     .add(iterativeOptions)
     .add(probeOptions)
+    .add(sls_options)
     .add(stampOptions)
-    .add(simplificationOptions)
+    .add(simp_schedules)
+    .add(occ_mem_limits)
+    .add(tern_res_options)
+    .add(sub_str_time_limits)
+    .add(bve_options)
+    .add(bva_options)
     .add(eqLitOpts)
     .add(componentOptions)
+    .add(mem_save_opts)
     #if defined(USE_M4RI) || defined(USE_GAUSS)
     .add(xorOptions)
     #endif
@@ -878,64 +1020,6 @@ void Main::check_options_correctness()
     }
 }
 
-void Main::handle_drat_option()
-{
-    if (!conf.simulate_drat) {
-        if (dratDebug) {
-            dratf = &cout;
-        } else {
-            std::ofstream* dratfTmp = new std::ofstream;
-            dratfTmp->open(dratfilname.c_str(), std::ofstream::out | std::ofstream::binary);
-            if (!*dratfTmp) {
-                std::cerr
-                << "ERROR: Could not open DRAT file "
-                << dratfilname
-                << " for writing"
-                << endl;
-
-                std::exit(-1);
-            }
-            dratf = dratfTmp;
-        }
-    }
-
-    if (!conf.otfHyperbin) {
-        if (conf.verbosity) {
-            cout
-            << "c OTF hyper-bin is needed for BProp in DRAT, turning it back"
-            << endl;
-        }
-        conf.otfHyperbin = true;
-    }
-
-    if (conf.doFindXors) {
-        if (conf.verbosity) {
-            cout
-            << "c XOR manipulation is not supported in DRAT, turning it off"
-            << endl;
-        }
-        conf.doFindXors = false;
-    }
-
-    if (conf.doRenumberVars) {
-        if (conf.verbosity) {
-            cout
-            << "c Variable renumbering is not supported during DRAT, turning it off"
-            << endl;
-        }
-        conf.doRenumberVars = false;
-    }
-
-    if (conf.doCompHandler) {
-        if (conf.verbosity) {
-            cout
-            << "c Component finding & solving is not supported during DRAT, turning it off"
-            << endl;
-        }
-        conf.doCompHandler = false;
-    }
-}
-
 void Main::parse_restart_type()
 {
     if (vm.count("restart")) {
@@ -965,6 +1049,23 @@ void Main::parse_polarity_type()
 
 void Main::manually_parse_some_options()
 {
+    if (conf.which_sls != "yalsat" && conf.which_sls != "walksat" && conf.which_sls != "ccnr") {
+        cout << "ERROR: you gave '" << conf.which_sls << " for SLS with the option '--slstype'."
+        << " This is incorrect, we only accept 'yalsat' and 'walksat'"
+        << endl;
+        exit(-1);
+    }
+
+    if (conf.yalsat_max_mems < 1) {
+        cout << "ERROR: '--walkmems' must be at least 1" << endl;
+        exit(-1);
+    }
+
+    if (conf.sls_every_n < 1) {
+        cout << "ERROR: '--walkeveryn' must be at least 1" << endl;
+        exit(-1);
+    }
+
     if (conf.maxXorToFind > MAX_XOR_RECOVER_SIZE) {
         cout << "ERROR: The '--maxxorsize' parameter cannot be larger than " << MAX_XOR_RECOVER_SIZE << endl;
         exit(-1);
@@ -979,11 +1080,6 @@ void Main::manually_parse_some_options()
         std::exit(-1);
     }
 
-    if (!vm["savedstate"].defaulted() && conf.preprocess == 0) {
-        cout << "ERROR: It does not make sense to have --savedstate passed and not use preprocessing" << endl;
-        exit(-1);
-    }
-
     if (!decisions_for_model_fname.empty() && max_nr_of_solutions > 1) {
         std::cerr << "ERROR: dumping decisions for multi-solution makes no sense. Exiting." << endl;
         std::exit(-1);
@@ -995,6 +1091,10 @@ void Main::manually_parse_some_options()
 
     if (max_nr_of_solutions > 1) {
         conf.need_decisions_reaching = true;
+    }
+
+    if (conf.random_var_freq < 0 || conf.random_var_freq > 1) {
+        throw WrongParam(lexical_cast<string>(conf.random_var_freq), "Illegal random var frequency ");
     }
 
     if (conf.preprocess != 0) {
@@ -1058,6 +1158,11 @@ void Main::manually_parse_some_options()
         if (!vm.count("eratio")) {
             conf.varElimRatioPerIter = 2.0;
         }
+    } else {
+        if (!vm["savedstate"].defaulted()) {
+            cout << "ERROR: It does not make sense to have --savedstate passed and not use preprocessing" << endl;
+            exit(-1);
+        }
     }
 
     if (vm.count("dumpresult")) {
@@ -1074,10 +1179,6 @@ void Main::manually_parse_some_options()
     }
 
     parse_polarity_type();
-
-    if (conf.random_var_freq < 0 || conf.random_var_freq > 1) {
-        throw WrongParam(lexical_cast<string>(conf.random_var_freq), "Illegal random var frequency ");
-    }
 
     //Conflict
     if (vm.count("maxdump") && redDumpFname.empty()) {
@@ -1248,6 +1349,13 @@ int Main::solve()
     if (dratf) {
         solver->set_drat(dratf, clause_ID_needed);
     }
+    if (vm.count("maxtime")) {
+        solver->set_max_time(maxtime);
+    }
+    if (vm.count("maxconfl")) {
+        solver->set_max_confl(maxconfl);
+    }
+
     check_num_threads_sanity(num_threads);
     solver->set_num_threads(num_threads);
     if (sql != 0) {
@@ -1328,7 +1436,7 @@ void Main::dump_decisions_for_model()
     if (conf.verbosity) {
         cout << "c size of get_decisions_reaching_model: "
         << solver->get_decisions_reaching_model().size()
-        << endl;;
+        << endl;
     }
     for(const Lit l: solver->get_decisions_reaching_model()) {
         decfile << l << " 0" << endl;
@@ -1340,10 +1448,11 @@ lbool Main::multi_solutions()
     unsigned long current_nr_of_solutions = 0;
     lbool ret = l_True;
     while(current_nr_of_solutions < max_nr_of_solutions && ret == l_True) {
-        ret = solver->solve(NULL, only_indep_solution);
+        ret = solver->solve(NULL, only_sampling_solution);
         current_nr_of_solutions++;
         if (ret == l_True && !decisions_for_model_fname.empty()) {
             dump_decisions_for_model();
+            assert(max_nr_of_solutions == 1);
         }
 
         if (ret == l_True && current_nr_of_solutions < max_nr_of_solutions) {
@@ -1364,7 +1473,7 @@ lbool Main::multi_solutions()
 
             //Banning found solution
             vector<Lit> lits;
-            if (independent_vars.empty()) {
+            if (sampling_vars.empty()) {
                 if (solver->get_decision_reaching_valid()) {
                     //only decision vars
                     for (Lit lit: solver->get_decisions_reaching_model()) {
@@ -1379,7 +1488,7 @@ lbool Main::multi_solutions()
                     }
                 }
             } else {
-              for (const uint32_t var: independent_vars) {
+              for (const uint32_t var: sampling_vars) {
                   if (solver->get_model()[var] != l_Undef) {
                       lits.push_back( Lit(var, (solver->get_model()[var] == l_True)? true : false) );
                   }

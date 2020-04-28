@@ -31,7 +31,7 @@ if(NOT("${RES}" STREQUAL "0"))
     message(STATUS "Output of LIT stdout: '${LIT_VER_OUT}'")
     message(STATUS "Output of LIT stderr: '${LIT_VER_ERR}'")
     message(STATUS "LIT result val is: '${RES}'")
-    message(FATAL_ERROR "Could not find 'lit' tool. You need to install it by e.g. 'pip install lit' or 'python -m pip install lit'. If it's already installed, set LIT_TOOL to the full path for lit")
+    message(FATAL_ERROR "Could not find 'lit' tool for Python executable ${PYTHON_EXECUTABLE}. You need to install it for this Python version by running '${PYTHON_EXECUTABLE} -m pip install lit'. If it's already installed, set LIT_TOOL to the full path for lit")
 endif()
 
 set(LIT_ARGS -v CACHE STRING "Arguments to pass to lit")
@@ -93,7 +93,7 @@ add_executable(readme_test
     readme_test.cpp
 )
 target_link_libraries(readme_test
-    libcryptominisat5
+    cryptominisat5
 )
 add_test (
     NAME readme_test
@@ -107,7 +107,7 @@ if (NOT SANITIZE)
         c_test.c
     )
     target_link_libraries(c_test
-        libcryptominisat5
+        cryptominisat5
     )
     add_test (
         NAME c_test
@@ -121,7 +121,7 @@ add_executable(multisol_test
     multisol_test.cpp
 )
 target_link_libraries(multisol_test
-    libcryptominisat5
+    cryptominisat5
 )
 add_test (
     NAME multisol_test
@@ -141,6 +141,18 @@ if (IPASIR)
     add_test (
         NAME ipasir_test
         COMMAND ipasir_test
+        WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+    )
+
+    add_executable(ipasir_example
+        ipasir_example.c
+    )
+    target_link_libraries(ipasir_example
+        ipasircryptominisat5
+    )
+    add_test (
+        NAME ipasir_example
+        COMMAND ipasir_example
         WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
     )
 endif()
@@ -167,6 +179,8 @@ set (MY_TESTS
     dump_test
     searcher_test
     solver_test
+    ternary_resolve_test
+    implied_by_test
 #    undefine_test
 )
 
@@ -182,7 +196,7 @@ foreach(F ${MY_TESTS})
         ${F}.cpp
     )
     target_link_libraries(${F}
-        libcryptominisat5
+        cryptominisat5
         ${GTEST_BOTH_LIBRARIES}
     )
     add_test (

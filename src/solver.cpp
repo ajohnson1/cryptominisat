@@ -65,6 +65,7 @@ THE SOFTWARE.
 #include "sqlstats.h"
 #include "drat.h"
 #include "xorfinder.h"
+#include "sls.h"
 
 using namespace CMSat;
 using std::cout;
@@ -129,6 +130,13 @@ Solver::~Solver()
     delete subsumeImplicit;
     delete datasync;
     delete reduceDB;
+}
+
+void Solver::enable_comphandler()
+{
+    assert(compHandler == NULL);
+    assert(nVars() == 0);
+    compHandler = new CompHandler(this);
 }
 
 void Solver::set_sqlite(string
@@ -447,7 +455,7 @@ Clause* Solver::add_clause_int(
             #endif
             );
             if (red) {
-                c->makeRed(cl_stats.glue);
+                c->makeRed();
             }
             c->stats = cl_stats;
             #ifdef STATS_NEEDED
@@ -458,10 +466,11 @@ Clause* Solver::add_clause_int(
             if (attach_long) {
                 attachClause(*c);
             } else {
-                if (red)
+                if (red) {
                     litStats.redLits += ps.size();
-                else
+                } else {
                     litStats.irredLits += ps.size();
+                }
             }
 
             return c;
@@ -479,10 +488,11 @@ void Solver::attachClause(
     #endif
 
     //Update stats
-    if (cl.red())
+    if (cl.red()) {
         litStats.redLits += cl.size();
-    else
+    } else {
         litStats.irredLits += cl.size();
+    }
 
     //Call Solver's function for heavy-lifting
     PropEngine::attachClause(cl, checkAttach);
@@ -1032,7 +1042,7 @@ void Solver::new_var(const bool bva, const uint32_t orig_outer)
     }
 
     if (bva) {
-        assumptionsSet.push_back(false);
+        assumptionsSet.push_back(l_Undef);
     }
 
     //Too expensive
@@ -1055,7 +1065,9 @@ void Solver::save_on_var_memory(const uint32_t newNumVars)
         compHandler->save_on_var_memory();
     }
     datasync->save_on_var_memory();
-    assumptionsSet.resize(nVars(), false);
+
+    assert(assumptionsSet.size() >= nVars());
+    assumptionsSet.resize(nVars());
     assumptionsSet.shrink_to_fit();
 
     const double time_used = cpuTime() - myTime;
@@ -1081,7 +1093,7 @@ void Solver::set_assumptions()
     back_number_from_outside_to_outer(outside_assumptions);
     vector<Lit> inter_assumptions = back_number_from_outside_to_outer_tmp;
     addClauseHelper(inter_assumptions);
-    assumptionsSet.resize(nVars(), false);
+    assumptionsSet.resize(nVars(), l_Undef);
     if (outside_assumptions.empty()) {
         return;
     }
@@ -1113,7 +1125,8 @@ void Solver::check_model_for_assumptions() const
         if (model_value(outside_lit) != l_True) {
             std::cerr
             << "ERROR, lit " << outside_lit
-            << " was in the assumptions, but it was set to its opposite value!"
+            << " was in the assumptions, but it was set to: "
+            << model_value(outside_lit)
             << endl;
         }
         assert(model_value(outside_lit) == l_True);
@@ -1199,16 +1212,16 @@ void Solver::check_minimization_effectiveness(const lbool status)
     }
 }
 
-void Solver::extend_solution(const bool only_indep_solution)
+void Solver::extend_solution(const bool only_sampling_solution)
 {
     #ifdef DEBUG_IMPLICIT_STATS
     check_stats();
     #endif
 
     #ifdef SLOW_DEBUG
-    //Check that independent vars are all assigned
-    if (conf.independent_vars) {
-        for(uint32_t outside_var: *conf.independent_vars) {
+    //Check that sampling vars are all assigned
+    if (conf.sampling_vars) {
+        for(uint32_t outside_var: *conf.sampling_vars) {
             uint32_t outer_var = map_to_with_bva(outside_var);
             outer_var = varReplacer->get_var_replaced_with_outer(outer_var);
             uint32_t int_var = map_outer_to_inter(outer_var);
@@ -1234,7 +1247,7 @@ void Solver::extend_solution(const bool only_indep_solution)
         compHandler->addSavedState(model, decisions_reaching_model);
     }
 
-    if (!only_indep_solution) {
+    if (!only_sampling_solution) {
         SolutionExtender extender(this, occsimplifier);
         extender.extend();
     } else {
@@ -1254,11 +1267,11 @@ void Solver::extend_solution(const bool only_indep_solution)
         }
     }
 
-    if (only_indep_solution) {
-        assert(conf.independent_vars);
-        for(uint32_t var: *conf.independent_vars) {
+    if (only_sampling_solution) {
+        assert(conf.sampling_vars);
+        for(uint32_t var: *conf.sampling_vars) {
             if (model[var] == l_Undef) {
-                cout << "ERROR: variable " << var+1 << " is set as independent but is unset!" << endl;
+                cout << "ERROR: variable " << var+1 << " is set as sampling but is unset!" << endl;
                 cout << "NOTE: var " << var + 1 << " has removed value: "
                 << removed_type_to_string(varData[var].removed)
                 << " and is set to " << value(var) << endl;
@@ -1341,13 +1354,18 @@ void Solver::check_config_parameters() const
     }
 
     #ifdef SLOW_DEBUG
-    if (solver->conf.independent_vars)
+    if (solver->conf.sampling_vars)
     {
-        for(uint32_t v: *solver->conf.independent_vars) {
+        for(uint32_t v: *solver->conf.sampling_vars) {
             assert(v < nVarsOutside());
         }
     }
     #endif
+
+    if (conf.blocking_restart_trail_hist_length == 0) {
+        std::cerr << "ERROR: Blocking restart length must be at least 0" << endl;
+        exit(-1);
+    }
 
     check_xor_cut_config_sanity();
 }
@@ -1367,6 +1385,7 @@ lbool Solver::simplify_problem_outside()
     decisions_reaching_model_valid = false;
 
     conf.global_timeout_multiplier = conf.orig_global_timeout_multiplier;
+    solveStats.num_simplify_this_solve_call = 0;
 
     if (!ok) {
         return l_False;
@@ -1378,7 +1397,10 @@ lbool Solver::simplify_problem_outside()
 
     lbool status = l_Undef;
     if (nVars() > 0 && conf.do_simplify_problem) {
+        bool backup = conf.doSLS;
+        conf.doSLS = false;
         status = simplify_problem(false);
+        conf.doSLS = backup;
     }
     unfill_assumptions_set_from(assumptions);
     assumptions.clear();
@@ -1387,7 +1409,7 @@ lbool Solver::simplify_problem_outside()
 
 lbool Solver::solve_with_assumptions(
     const vector<Lit>* _assumptions,
-    const bool only_indep_solution
+    const bool only_sampling_solution
 ) {
     fresh_solver = false;
     decisions_reaching_model.clear();
@@ -1395,13 +1417,21 @@ lbool Solver::solve_with_assumptions(
     move_to_outside_assumps(_assumptions);
     #ifdef SLOW_DEBUG
     if (ok) {
-        check_clid_correct();
         assert(check_order_heap_sanity());
         check_implicit_stats();
         find_all_attach();
         check_no_duplicate_lits_anywhere();
     }
     #endif
+
+    #ifdef USE_GAUSS
+    if (conf.verbosity) {
+        cout << "c WARN: Turning OFF non-chronological backtracking because it interferes with GAUSS"
+        << endl;
+    }
+    conf.diff_declev_for_chrono = -1;
+    #endif
+
 
     solveStats.num_solve_calls++;
     conflict.clear();
@@ -1413,8 +1443,10 @@ lbool Solver::solve_with_assumptions(
     max_confl_this_phase = max_confl_phase;
     VSIDS = true;
     var_decay_vsids = conf.var_decay_vsids_start;
+    lit_decay_lsids = conf.var_decay_vsids_start;
     step_size = conf.orig_step_size;
     conf.global_timeout_multiplier = conf.orig_global_timeout_multiplier;
+    solveStats.num_simplify_this_solve_call = 0;
     params.rest_type = conf.restartType;
     if (params.rest_type == Restart::glue_geom) {
         params.rest_type = Restart::geom;
@@ -1464,7 +1496,7 @@ lbool Solver::solve_with_assumptions(
         && nVars() > 0
         && conf.do_simplify_problem
         && conf.simplify_at_startup
-        && (solveStats.numSimplify == 0 || conf.simplify_at_every_startup)
+        && (solveStats.num_simplify == 0 || conf.simplify_at_every_startup)
     ) {
         status = simplify_problem(!conf.full_simplify_at_startup);
     }
@@ -1503,12 +1535,15 @@ lbool Solver::solve_with_assumptions(
         << endl;
     }
 
-    handle_found_solution(status, only_indep_solution);
+    handle_found_solution(status, only_sampling_solution);
     unfill_assumptions_set_from(assumptions);
     assumptions.clear();
     conf.max_confl = std::numeric_limits<long>::max();
     conf.maxTime = std::numeric_limits<double>::max();
     drat->flush();
+    assert(decisionLevel()== 0);
+    assert(!ok || solver->prop_at_head());
+
     return status;
 }
 
@@ -1518,7 +1553,7 @@ void Solver::check_reconfigure()
         && longIrredCls.size() > 1
         && (binTri.irredBins + binTri.redBins) > 1
     ) {
-        if (solveStats.numSimplify == conf.reconfigure_at &&
+        if (solveStats.num_simplify == conf.reconfigure_at &&
             !already_reconfigured
         ) {
             check_calc_features();
@@ -1683,6 +1718,8 @@ long Solver::calc_num_confl_to_do_this_iter(const size_t iteration_num) const
 lbool Solver::iterate_until_solved()
 {
     size_t iteration_num = 0;
+    size_t iteration_num_vsids = 0;
+    size_t iteration_num_maple = 0;
     VSIDS = true;
 
     lbool status = l_Undef;
@@ -1691,10 +1728,6 @@ lbool Solver::iterate_until_solved()
         && cpuTime() < conf.maxTime
         && sumConflicts < (uint64_t)conf.max_confl
     ) {
-        #ifdef SLOW_DEBUG
-        check_clid_correct();
-        #endif
-
         iteration_num++;
         if (conf.verbosity && iteration_num >= 2) {
             print_clause_size_distrib();
@@ -1705,7 +1738,7 @@ lbool Solver::iterate_until_solved()
         if (num_confl <= 0) {
             break;
         }
-        status = Searcher::solve(num_confl, iteration_num);
+        status = Searcher::solve(num_confl);
 
         //Check for effectiveness
         check_recursive_minimization_effectiveness(status);
@@ -1744,8 +1777,29 @@ lbool Solver::iterate_until_solved()
             long modulo = ((long)iteration_num-1) % conf.modulo_maple_iter;
             if (modulo < ((long)conf.modulo_maple_iter-1)) {
                 VSIDS = false;
+                if (conf.alternate_maple) {
+                    if ((iteration_num_maple%2) == 0) {
+                        maple_decay_base = conf.alternate_maple_decay_rate1;
+                    } else {
+                        maple_decay_base = conf.alternate_maple_decay_rate2;
+                    }
+                }
+                iteration_num_maple++;
             } else {
                 VSIDS = true;
+                if (conf.alternate_vsids)
+                {
+                    if ((iteration_num_vsids%2) == 1) {
+                        conf.var_decay_vsids_start = conf.alternate_vsids_decay_rate1;
+                        conf.var_decay_vsids_max = conf.alternate_vsids_decay_rate1;
+                        var_decay_vsids = conf.alternate_vsids_decay_rate1;
+                    } else {
+                        conf.var_decay_vsids_start = conf.alternate_vsids_decay_rate2;
+                        conf.var_decay_vsids_max = conf.alternate_vsids_decay_rate2;
+                        var_decay_vsids = conf.alternate_vsids_decay_rate2;
+                    }
+                }
+                iteration_num_vsids++;
             }
         } else {
             //so that in case of reconfiguration, VSIDS is correctly set
@@ -1779,11 +1833,12 @@ void Solver::check_too_many_low_glues()
     }
 }
 
-void Solver::handle_found_solution(const lbool status, const bool only_indep_solution)
+void Solver::handle_found_solution(const lbool status, const bool only_sampling_solution)
 {
     if (status == l_True) {
-        extend_solution(only_indep_solution);
+        extend_solution(only_sampling_solution);
         cancelUntil(0);
+        assert(solver->prop_at_head());
 
         #ifdef DEBUG_ATTACH_MORE
         find_all_attach();
@@ -1794,7 +1849,7 @@ void Solver::handle_found_solution(const lbool status, const bool only_indep_sol
 
         for(const Lit lit: conflict) {
             if (value(lit) == l_Undef) {
-                assert(var_inside_assumptions(lit.var()));
+                assert(var_inside_assumptions(lit.var()) != l_Undef);
             }
         }
         update_assump_conflict_to_orig_outside(conflict);
@@ -1806,7 +1861,7 @@ void Solver::handle_found_solution(const lbool status, const bool only_indep_sol
     #endif
 }
 
-bool Solver::execute_inprocess_strategy(
+lbool Solver::execute_inprocess_strategy(
     const bool startup
     , const string& strategy
 ) {
@@ -1822,7 +1877,7 @@ bool Solver::execute_inprocess_strategy(
             || nVars() == 0
             || !okay()
         ) {
-            return ok;
+            break;
         }
         assert(watches.get_smudged_list().empty());
         assert(prop_at_head());
@@ -1830,7 +1885,6 @@ bool Solver::execute_inprocess_strategy(
         check_wrong_attach();
         #ifdef SLOW_DEBUG
         check_stats();
-        check_clid_correct();
         check_no_duplicate_lits_anywhere();
         #endif
 
@@ -1854,7 +1908,7 @@ bool Solver::execute_inprocess_strategy(
                 || nVars() == 0
                 || !ok
             ) {
-                return ok;
+                break;
             }
             #ifdef SLOW_DEBUG
             solver->check_stats();
@@ -1866,7 +1920,7 @@ bool Solver::execute_inprocess_strategy(
         }
 
         if (token == "find-comps" &&
-            conf.independent_vars == NULL //no point finding, cannot be handled
+            conf.sampling_vars == NULL //no point finding, cannot be handled
         ) {
             if (get_num_free_vars() < conf.compVarLimit*solver->conf.var_and_mem_out_mult) {
                 CompFinder findParts(this);
@@ -1875,11 +1929,11 @@ bool Solver::execute_inprocess_strategy(
         } else if (token == "handle-comps") {
             if (compHandler
                 && conf.doCompHandler
-                && conf.independent_vars == NULL
+                && conf.sampling_vars == NULL
                 && get_num_free_vars() < conf.compVarLimit*solver->conf.var_and_mem_out_mult
-                && solveStats.numSimplify >= conf.handlerFromSimpNum
+                && solveStats.num_simplify >= conf.handlerFromSimpNum
                 //Only every 2nd, since it can be costly to find parts
-                && solveStats.numSimplify % 2 == 0 //TODO
+                && solveStats.num_simplify % 2 == 0 //TODO
             ) {
                 compHandler->handle();
             }
@@ -1900,6 +1954,17 @@ bool Solver::execute_inprocess_strategy(
             //subsume BIN with BIN
             if (conf.doStrSubImplicit) {
                 subsumeImplicit->subsume_implicit();
+            }
+        } else if (token == "sls") {
+            assert(conf.sls_every_n > 0);
+            if (conf.doSLS
+                && solveStats.num_simplify % conf.sls_every_n == (conf.sls_every_n-1)
+            ) {
+                SLS sls(this);
+                const lbool ret = sls.run(solveStats.num_simplify);
+                if (ret == l_True) {
+                    return l_True;
+                }
             }
         } else if (token == "intree-probe") {
             if (conf.doIntreeProbe) {
@@ -1944,6 +2009,8 @@ bool Solver::execute_inprocess_strategy(
                     conf.doCache = false;
                 }
             }
+        } else if (token == "cl-consolidate") {
+            cl_alloc.consolidate(this, false, true);
         } else if (token == "renumber" || token == "must-renumber") {
             if (conf.doRenumberVars) {
                 //Clean cache before renumber -- very important, otherwise
@@ -1952,12 +2019,12 @@ bool Solver::execute_inprocess_strategy(
                     bool setSomething = true;
                     while(setSomething) {
                         if (!implCache.clean(this, &setSomething))
-                            return false;
+                            return l_False;
                     }
                 }
 
-                if (!renumber_variables(token == "must-renumber")) {
-                    return false;
+                if (!renumber_variables(token == "must-renumber" || conf.must_renumber)) {
+                    return l_False;
                 }
             }
         } else if (token == "") {
@@ -1975,12 +2042,12 @@ bool Solver::execute_inprocess_strategy(
         #endif
 
         if (!ok) {
-            return ok;
+            return l_False;
         }
         check_wrong_attach();
     }
 
-    return ok;
+    return ok ? l_Undef : l_False;
 }
 
 /**
@@ -2001,6 +2068,10 @@ lbool Solver::simplify_problem(const bool startup)
     assert(solver->no_marked_clauses());
     #endif
 
+    if (solveStats.num_simplify_this_solve_call >= conf.max_num_simplify_per_solve_call) {
+        return l_Undef;
+    }
+
     clear_order_heap();
     #ifdef USE_GAUSS
     clearEnGaussMatrixes();
@@ -2012,10 +2083,11 @@ lbool Solver::simplify_problem(const bool startup)
         << endl;
     }
 
+    lbool ret;
     if (startup) {
-        execute_inprocess_strategy(startup, conf.simplify_schedule_startup);
+        ret = execute_inprocess_strategy(startup, conf.simplify_schedule_startup);
     } else {
-        execute_inprocess_strategy(startup, conf.simplify_schedule_nonstartup);
+        ret = execute_inprocess_strategy(startup, conf.simplify_schedule_nonstartup);
     }
 
     //Free unused watch memory
@@ -2031,13 +2103,15 @@ lbool Solver::simplify_problem(const bool startup)
             conf.orig_global_timeout_multiplier*conf.global_multiplier_multiplier_max
         );
     if (conf.verbosity)
-        cout << "c global_timeout_multiplier: " << conf. global_timeout_multiplier << endl;
+        cout << "c global_timeout_multiplier: " << std::setprecision(4) <<  conf.global_timeout_multiplier << endl;
 
-    solveStats.numSimplify++;
+    solveStats.num_simplify++;
+    solveStats.num_simplify_this_solve_call++;
 
-    if (!ok) {
+    assert(!(ok == false && ret != l_False));
+    if (!ok || ret == l_False) {
         return l_False;
-    } else {
+    } else if (ret == l_Undef) {
         check_stats();
         check_implicit_propagated();
         rebuildOrderHeap();
@@ -2047,7 +2121,17 @@ lbool Solver::simplify_problem(const bool startup)
         #endif
         check_wrong_attach();
 
-        return l_Undef;
+        return ret;
+    } else {
+        assert(ret == l_True);
+        //nothing should happen here, we already have a full solution
+        //but let's check and put the propagation to HEAD
+        PropBy confl = propagate<false>();
+        assert(confl.isNULL());
+
+        finish_up_solve(ret);
+        rebuildOrderHeap();
+        return ret;
     }
 }
 
@@ -2127,10 +2211,11 @@ void Solver::print_min_stats(const double cpu_time, const double cpu_time_total)
     if (conf.perform_occur_based_simp) {
         if (conf.do_print_times)
         print_stats_line("c OccSimplifier time"
-            , occsimplifier->get_stats().total_time()
-            , stats_line_percent(occsimplifier->get_stats().total_time() ,cpu_time)
+            , occsimplifier->get_stats().total_time(occsimplifier)
+            , stats_line_percent(occsimplifier->get_stats().total_time(occsimplifier) ,cpu_time)
             , "% time"
         );
+        occsimplifier->get_sub_str()->get_stats().print_short(this);
     }
     if (conf.do_print_times)
     print_stats_line("c SCC time"
@@ -2212,6 +2297,17 @@ void Solver::print_norm_stats(const double cpu_time, const double cpu_time_total
         , "% time"
     );
 
+    print_stats_line("c LSIDS decisions"
+    , sumSearchStats.chrono_decisions
+    , stats_line_percent(sumSearchStats.chrono_decisions, sumSearchStats.decisions)
+    , "% all decisions"
+    );
+    print_stats_line("c LSIDS differed caching"
+    , sumSearchStats.lsids_opp_cached
+    , stats_line_percent(sumSearchStats.lsids_opp_cached, sumSearchStats.chrono_decisions)
+    , "% all LSIDS decisions"
+    );
+
     //Failed lit stats
     if (conf.doProbe
         && prober
@@ -2230,11 +2326,12 @@ void Solver::print_norm_stats(const double cpu_time, const double cpu_time_total
     if (conf.perform_occur_based_simp) {
         if (conf.do_print_times)
         print_stats_line("c OccSimplifier time"
-            , occsimplifier->get_stats().total_time()
-            , stats_line_percent(occsimplifier->get_stats().total_time() ,cpu_time)
+            , occsimplifier->get_stats().total_time(occsimplifier)
+            , stats_line_percent(occsimplifier->get_stats().total_time(occsimplifier) ,cpu_time)
             , "% time"
         );
-        occsimplifier->get_stats().print_short();
+        occsimplifier->get_stats().print_extra_times();
+        occsimplifier->get_sub_str()->get_stats().print_short(this);
     }
     print_stats_line("c SCC time"
         , varReplacer->get_scc_finder()->get_stats().cpu_time
@@ -2321,12 +2418,13 @@ void Solver::print_full_restart_stat(const double cpu_time, const double cpu_tim
     if (conf.perform_occur_based_simp) {
         if (conf.do_print_times)
         print_stats_line("c OccSimplifier time"
-            , occsimplifier->get_stats().total_time()
-            , stats_line_percent(occsimplifier->get_stats().total_time(), cpu_time)
+            , occsimplifier->get_stats().total_time(occsimplifier)
+            , stats_line_percent(occsimplifier->get_stats().total_time(occsimplifier), cpu_time)
             , "% time"
         );
 
-        occsimplifier->get_stats().print(nVarsOuter());
+        occsimplifier->get_stats().print(nVarsOuter(), occsimplifier);
+        occsimplifier->get_sub_str()->get_stats().print();
     }
 
     //TODO after TRI to LONG conversion
@@ -3087,7 +3185,7 @@ void Solver::update_assumptions_after_varreplace()
     //Update assumptions
     for(AssumptionPair& lit_pair: assumptions) {
         if (assumptionsSet.size() > lit_pair.lit_inter.var()) {
-            assumptionsSet[lit_pair.lit_inter.var()] = false;
+            assumptionsSet[lit_pair.lit_inter.var()] = l_Undef;
         } else {
             assert(value(lit_pair.lit_inter) != l_Undef
                 && "There can be NO other reason -- vars in assumptions cannot be elimed or decomposed");
@@ -3097,12 +3195,12 @@ void Solver::update_assumptions_after_varreplace()
         lit_pair.lit_inter = varReplacer->get_lit_replaced_with(lit_pair.lit_inter);
         //remove old from set
         if (orig != lit_pair.lit_inter && assumptionsSet.size() > orig.var()) {
-                assumptionsSet[orig.var()] = false;
+            assumptionsSet[orig.var()] = l_Undef;
         }
 
         //add new to set
         if (assumptionsSet.size() > lit_pair.lit_inter.var()) {
-            assumptionsSet[lit_pair.lit_inter.var()] = true;
+            assumptionsSet[lit_pair.lit_inter.var()] = lit_pair.lit_inter.sign() ? l_False: l_True;
         }
     }
 }
@@ -3352,6 +3450,7 @@ void Solver::reconfigure(int val)
         }
 
         default: {
+            //when this changes, don't forget to update README.markdown and the command line help (main.cpp)
             cout << "ERROR: Only reconfigure values of 3,4,6,7,12,13,14,15,16 are supported" << endl;
             exit(-1);
         }
@@ -3748,10 +3847,10 @@ void Solver::undef_fill_potentials()
 
         assert(varData[v].removed == Removed::none);
         assert(assumptionsSet.size() > v);
-        if (model_value(v) != l_Undef && assumptionsSet[v] == false) {
+        if (model_value(v) != l_Undef && assumptionsSet[v] == l_Undef) {
             assert(undef->can_be_unset[v] == 0);
             undef->can_be_unset[v] ++;
-            if (conf.independent_vars == NULL) {
+            if (conf.sampling_vars == NULL) {
                 undef->can_be_unset[v] ++;
                 undef->can_be_unsetSum++;
             }
@@ -3763,13 +3862,13 @@ void Solver::undef_fill_potentials()
         cout << "-" << endl;
     }
 
-    //If independent_vars is set, only care about those, nothing else.
-    if (conf.independent_vars) {
-        for(uint32_t v: *conf.independent_vars) {
+    //If sampling_vars is set, only care about those, nothing else.
+    if (conf.sampling_vars) {
+        for(uint32_t v: *conf.sampling_vars) {
             if (v > nVarsOutside()) {
-                cout << "ERROR: Variable in independent set, " << v+1
+                cout << "ERROR: Variable in sampling set, " << v+1
                 << " is bigger than any variable inside the solver! " << endl
-                << " Please examine the call set_independent_vars or the CNF"
+                << " Please examine the call set_sampling_vars or the CNF"
                 " lines starting with 'c ind'"
                 << endl;
                 std::exit(-1);
@@ -3785,7 +3884,7 @@ void Solver::undef_fill_potentials()
             }
         }
 
-        //Only those with a setting of both independent_vars and in trail
+        //Only those with a setting of both sampling_vars and in trail
         //can be unset
         for(auto& v: undef->can_be_unset) {
             if (v < 2) {
@@ -4000,13 +4099,7 @@ void Solver::renumber_xors_to_outside(const vector<Xor>& xors, vector<Xor>& xors
 bool Solver::init_all_matrixes()
 {
     assert(ok);
-
-    vector<EGaussian*>::iterator i = gmatrixes.begin();
-    vector<EGaussian*>::iterator j = i;
-    vector<EGaussian*>::iterator gend = gmatrixes.end();
-    for (; i != gend; i++) {
-        EGaussian* g = *i;
-
+    for (EGaussian*& g :gmatrixes) {
         bool created = false;
         // initial arrary. return true is fine , return false means solver already false;
         if (!g->full_init(created)) {
@@ -4015,17 +4108,14 @@ bool Solver::init_all_matrixes()
         if (!ok) {
             break;
         }
-        if (created) {
-            *j++=*i;
-        } else {
+        if (!created) {
             delete g;
+            if (conf.verbosity > 5) {
+                cout << "DELETED matrix" << endl;
+            }
+            g = NULL;
         }
     }
-    while(i != gend) {
-        *j++ = *i++;
-    }
-    gmatrixes.resize(solver->gmatrixes.size()-(i-j));
-    gqueuedata.resize(gmatrixes.size());
     for(auto& gqd: gqueuedata) {
         gqd.reset_stats();
     }
@@ -4148,4 +4238,89 @@ void Solver::learnt_clausee_query_map_without_bva(vector<Lit>& cl)
     for(auto& l: cl) {
         l = Lit(learnt_clause_query_outer_to_without_bva_map[l.var()], l.sign());
     }
+}
+
+
+void Solver::check_assigns_for_assumptions() const
+{
+    for (auto& ass: solver->assumptions) {
+        if (value(ass.lit_inter) != l_True) {
+            cout << "ERROR: Internal assumption " << ass.lit_inter
+            << " is not set to l_True, it's set to: " << value(ass.lit_inter)
+            << endl;
+            assert(lit_inside_assumptions(ass.lit_inter) == l_True);
+        }
+        assert(value(ass.lit_inter) == l_True);
+    }
+}
+
+bool Solver::check_assumptions_contradict_foced_assignement() const
+{
+    for (auto& ass: solver->assumptions) {
+        if (value(ass.lit_inter) == l_False) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool Solver::implied_by(const std::vector<Lit>& lits,
+                                  std::vector<Lit>& out_implied)
+{
+    out_implied.clear();
+    if (!okay()) {
+        return false;
+    }
+
+    implied_by_tmp_lits = lits;
+    if (!addClauseHelper(implied_by_tmp_lits)) {
+        return false;
+    }
+
+    assert(decisionLevel() == 0);
+    for(Lit p: implied_by_tmp_lits) {
+        if (value(p) == l_Undef) {
+            new_decision_level();
+            enqueue<false>(p);
+        }
+        if (value(p) == l_False) {
+            cancelUntil(0);
+            return false;
+        }
+    }
+
+    if (decisionLevel() == 0) {
+        return true;
+    }
+
+    PropBy x = propagate<false>();
+    if (!x.isNULL()) {
+        //UNSAT due to prop
+        cancelUntil(0);
+        return false;
+    }
+    //DO NOT add the "optimization" to return when nothing got propagated
+    //replaced variables CAN be added!!!
+
+    out_implied.reserve(trail.size()-trail_lim[0]);
+    for(uint32_t i = trail_lim[0]; i < trail.size(); i++) {
+        if (trail[i].lit.var() < nVars()) {
+            out_implied.push_back(trail[i].lit);
+        }
+    }
+    cancelUntil(0);
+
+    //Map to outer
+    for(auto& l: out_implied) {
+        l = map_inter_to_outer(l);
+    }
+    varReplacer->extend_pop_queue(out_implied);
+
+    //Map to outside
+    if (get_num_bva_vars() != 0) {
+        cout << "get_num_bva_vars(): " << get_num_bva_vars() << endl;
+        assert(false && "BVA is currently not allowed in this mode, please turn it off");
+        //out_implied = map_back_vars_to_without_bva(out_implied);
+    }
+    return true;
 }

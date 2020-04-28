@@ -88,18 +88,6 @@ template SubsumeStrengthen::Sub0Ret SubsumeStrengthen::subsume_and_unlink(
     , const bool removeImplicit
 );
 
-uint32_t SubsumeStrengthen::backw_sub_long_with_implicit(
-    const vector<Lit>& lits
-) {
-    Sub0Ret ret = subsume_and_unlink(
-        CL_OFFSET_MAX
-        , lits
-        , calcAbstraction(lits)
-        , false
-    );
-    return ret.numSubsumed;
-}
-
 /**
 @brief Backward-subsumption using given clause
 */
@@ -248,8 +236,11 @@ void SubsumeStrengthen::backw_sub_long_with_long()
     size_t subsumed = 0;
     const int64_t orig_limit = simplifier->subsumption_time_limit;
     randomise_clauses_order();
+    const size_t max_go_through =
+        solver->conf.subsume_gothrough_multip*(double)simplifier->clauses.size();
+
     while (*simplifier->limit_to_decrease > 0
-        && (double)wenThrough < solver->conf.subsume_gothrough_multip*(double)simplifier->clauses.size()
+        && wenThrough < max_go_through
     ) {
         *simplifier->limit_to_decrease -= 3;
         wenThrough++;
@@ -820,7 +811,7 @@ void SubsumeStrengthen::finishedRun()
 
 void SubsumeStrengthen::Stats::print_short(const Solver* solver) const
 {
-    cout << "c [subs] long"
+    cout << "c [occ-substr] long"
     << " subBySub: " << subsumedBySub
     << " subByStr: " << subsumedByStr
     << " lits-rem-str: " << litsRemStrengthen
